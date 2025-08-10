@@ -1,51 +1,34 @@
-// index.js
 require("dotenv").config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
+const {
+  Client, GatewayIntentBits, EmbedBuilder, Events, Routes, REST
+} = require("discord.js");
 const axios = require("axios");
 
 // ===== CONFIG =====
-const PREFIX = "!";
-const BASE = process.env.BACKEND_URL; 
-if (!BASE) throw new Error("BACKEND_URL is not set");
-// Optional shared secret support (backend check):
-const API_HEADERS = {}; // e.g., { "X-Api-Key": process.env.API_KEY }
+const BASE = process.env.BACKEND_URL;
+if (!BASE) throw new Error("BACKEND_URL not set");
+const API_HEADERS = {};
+if (process.env.API_KEY) API_HEADERS["X-Api-Key"] = process.env.API_KEY;
 
-// ===== MODS =====
+const SITE_BASE = (process.env.SITE_BASE || "https://tfpl.vercel.app").replace(/\/+$/, "");
+
+function normalizeUrl(u) {
+  if (!u) return u;
+  try { new URL(u); return u; } catch (_) { /* not absolute */ }
+  if (u.startsWith("/")) return `${SITE_BASE}${u}`;
+  return u; // leave other non-absolute strings alone
+}
+// Mods: Rehan
 const MOD_IDS = ["626536164236591120"];
 
-function isMod(userId) {
-  return MOD_IDS.includes(String(userId));
-}
+function isMod(userId) { return MOD_IDS.includes(String(userId)); }
 function ensureCanEdit(actorId, targetId) {
-  actorId = String(actorId);
-  targetId = String(targetId);
-  if (actorId === targetId) return;      // self-edit allowed
-  if (isMod(actorId)) return;            // mods can edit anyone
+  actorId = String(actorId); targetId = String(targetId);
+  if (actorId === targetId) return;
+  if (isMod(actorId)) return;
   const err = new Error("You can only edit your own profile. Mods can edit anyone.");
   err.status = 403;
   throw err;
-}
-
-// ===== DISCORD CLIENT =====
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
-});
-
-// ===== HELPERS =====
-function parseTargetId(message, args) {
-  // If a user is mentioned, use that. Else if last arg looks like an ID, use it. Otherwise use author.
-  const mention = message.mentions.users.first();
-  if (mention) return mention.id;
-  const last = args[args.length - 1];
-  if (last && /^\d{15,20}$/.test(last)) {
-    args.pop(); // remove ID from args so it's not part of the field value
-    return last;
-  }
-  return message.author.id;
 }
 
 async function getProfile(discordId) {
@@ -54,13 +37,17 @@ async function getProfile(discordId) {
   return data;
 }
 
-async function updateProfile(discordId, fields) {
+async function updateProfile(discordId, fields, actorId) {
   const url = `${BASE}/user/${discordId}`;
-  const { data } = await axios.post(url, fields, { headers: API_HEADERS });
+  const headers = { ...API_HEADERS, actor_id: String(actorId) }; // backend can enforce if added
+  const { data } = await axios.post(url, fields, { headers });
   return data;
 }
 
 function makeEmbed(profile) {
+  const imgRaw = profile.dynamic_image_url || profile.image_url;
+  const img = normalizeUrl(imgRaw);
+
   const e = new EmbedBuilder()
     .setTitle(`${profile.name || "Unknown"}${profile.team ? ` (${profile.team})` : ""}`)
     .setDescription(profile.bio || "No bio set.")
@@ -70,105 +57,115 @@ function makeEmbed(profile) {
     )
     .setColor(0x5865f2);
 
-  const img = profile.dynamic_image_url || profile.image_url;
   if (img) e.setThumbnail(img);
   return e;
 }
 
-// ===== COMMAND HANDLER =====
-client.on("messageCreate", async (message) => {
-  if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
 
-  const [cmd, ...rest] = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command = (cmd || "").toLowerCase();
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
+
+// (Optional) auto-register commands on start for your guild
+async function registerCommandsOnReady() {
+  const rest = new REST({ version: "10" }).setToken(process.env.BOT_TOKEN);
+  try {
+    const cmds = await rest.get(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID));
+    console.log(`Guild has ${cmds.length} slash commands registered.`);
+  } catch (e) {
+    console.log("Tip: run `node deploy-commands.js` to register slash commands.");
+  }
+}
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`Logged in as ${c.user.tag}`);
+  await registerCommandsOnReady();
+});
+
+// Interaction handler
+client.on(Events.InteractionCreate, async (interaction) => {
+    
+    if (interaction.commandName === "ping") {
+    await interaction.reply({ content: "Pong!", ephemeral: true });
+    return;
+    }
+  
+    if (!interaction.isChatInputCommand()) return;
 
   try {
-    // Show profile
-    if (command === "me") {
-      const targetId = parseTargetId(message, rest);
-      const profile = await getProfile(targetId);
-      return void message.reply({ embeds: [makeEmbed(profile)] });
+    // /me
+    if (interaction.commandName === "me") {
+    await interaction.deferReply({ ephemeral: false }); // reply slot reserved
+    const user = interaction.options.getUser("user");
+    const targetId = user?.id || interaction.user.id;
+    const profile = await getProfile(targetId);
+    return await interaction.editReply({ embeds: [makeEmbed(profile)] });
     }
 
-    // Update BIO
-    if (command === "setbio") {
-      if (rest.length === 0) return void message.reply("Usage: `!setbio <text> [@user|id]`");
-      const actorId = message.author.id;
-      const targetId = parseTargetId(message, rest);
-      ensureCanEdit(actorId, targetId);
+    // /setbio
+    if (interaction.commandName === "setbio") {
+    await interaction.deferReply({ ephemeral: true }); // updates can be quiet
+    const text = interaction.options.getString("text", true);
+    const user = interaction.options.getUser("user");
+    const actorId = interaction.user.id;
+    const targetId = user?.id || actorId;
 
-      const bio = rest.join(" ").trim();
-      const res = await updateProfile(targetId, { bio });
-      await message.reply(`✅ Bio updated for <@${targetId}>.`);
-      return void message.channel.send({ embeds: [makeEmbed(res.user)] });
+    ensureCanEdit(actorId, targetId);
+    const res = await updateProfile(targetId, { bio: text }, actorId);
+    await interaction.editReply(`✅ Bio updated for <@${targetId}>.`);
+    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
     }
 
-    // Update Favorite Club
-    if (command === "setclub") {
-      if (rest.length === 0) return void message.reply("Usage: `!setclub <club name> [@user|id]`");
-      const actorId = message.author.id;
-      const targetId = parseTargetId(message, rest);
-      ensureCanEdit(actorId, targetId);
+    // /setclub
+    if (interaction.commandName === "setclub") {
+    await interaction.deferReply({ ephemeral: true });
+    const club = interaction.options.getString("club", true);
+    const user = interaction.options.getUser("user");
+    const actorId = interaction.user.id;
+    const targetId = user?.id || actorId;
 
-      const favorite_club = rest.join(" ").trim();
-      const res = await updateProfile(targetId, { favorite_club });
-      await message.reply(`✅ Favorite club updated for <@${targetId}>.`);
-      return void message.channel.send({ embeds: [makeEmbed(res.user)] });
+    ensureCanEdit(actorId, targetId);
+    const res = await updateProfile(targetId, { favorite_club: club }, actorId);
+    await interaction.editReply(`✅ Favorite club updated for <@${targetId}>.`);
+    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
     }
 
-    // Update Social URL
-    if (command === "setsocial") {
-      if (rest.length === 0) return void message.reply("Usage: `!setsocial <url> [@user|id]`");
-      const actorId = message.author.id;
-      const targetId = parseTargetId(message, rest);
-      ensureCanEdit(actorId, targetId);
+    // /setsocial
+    if (interaction.commandName === "setsocial") {
+    await interaction.deferReply({ ephemeral: true });
+    const url = interaction.options.getString("url", true);
+    const user = interaction.options.getUser("user");
+    const actorId = interaction.user.id;
+    const targetId = user?.id || actorId;
 
-      const social_url = rest.join(" ").trim();
-      const res = await updateProfile(targetId, { social_url });
-      await message.reply(`✅ Social URL updated for <@${targetId}>.`);
-      return void message.channel.send({ embeds: [makeEmbed(res.user)] });
+    ensureCanEdit(actorId, targetId);
+    const res = await updateProfile(targetId, { social_url: url }, actorId);
+    await interaction.editReply(`✅ Social URL updated for <@${targetId}>.`);
+    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
     }
 
-    // Update Image URL
-    if (command === "setimage") {
-      if (rest.length === 0) return void message.reply("Usage: `!setimage <image-url> [@user|id]`");
-      const actorId = message.author.id;
-      const targetId = parseTargetId(message, rest);
-      ensureCanEdit(actorId, targetId);
+    // /setimage
+    if (interaction.commandName === "setimage") {
+    await interaction.deferReply({ ephemeral: true });
+    const url = interaction.options.getString("url", true);
+    const user = interaction.options.getUser("user");
+    const actorId = interaction.user.id;
+    const targetId = user?.id || actorId;
 
-      const image_url = rest.join(" ").trim();
-      // Optional quick validation:
-      // try { new URL(image_url); } catch { return void message.reply("Provide a valid URL."); }
-      const res = await updateProfile(targetId, { image_url });
-      await message.reply(`✅ Image URL updated for <@${targetId}>.`);
-      return void message.channel.send({ embeds: [makeEmbed(res.user)] });
-    }
-
-    if (command === "help") {
-      return void message.reply(
-        [
-          "**Commands:**",
-          "`!me [@user|id]` – show profile",
-          "`!setbio <text> [@user|id]`",
-          "`!setclub <club> [@user|id]`",
-          "`!setsocial <url> [@user|id]`",
-          "`!setimage <url> [@user|id]`",
-          "",
-          "_You can only edit your own profile unless you’re one of them._",
-        ].join("\n")
-      );
+    ensureCanEdit(actorId, targetId);
+    const res = await updateProfile(targetId, { image_url: url }, actorId);
+    await interaction.editReply(`✅ Image URL updated for <@${targetId}>.`);
+    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
     }
 
   } catch (err) {
     console.error(err?.response?.data || err);
     const detail = err?.response?.data?.detail || err?.message || "Unknown error";
-    return void message.reply(`❌ Error: ${detail}`);
+    if (interaction.replied || interaction.deferred) {
+      return interaction.followUp({ content: `❌ ${detail}`, ephemeral: true });
+    }
+    return interaction.reply({ content: `❌ ${detail}`, ephemeral: true });
   }
 });
 
-// ===== BOOT =====
-client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
 client.login(process.env.BOT_TOKEN);

@@ -1,7 +1,54 @@
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
-const commands = [
+/* --- News commands --- */
+const publishNews = new SlashCommandBuilder()
+  .setName("publish_news")
+  .setDescription("Publish a News article to the site")
+  // REQUIRED first
+  .addStringOption(o =>
+    o.setName("title").setDescription("Title").setRequired(true).setMaxLength(120)
+  )
+  .addStringOption(o =>
+    o.setName("content").setDescription("Markdown content").setRequired(true).setMaxLength(1800)
+  )
+  // OPTIONAL after required
+  .addStringOption(o =>
+    o.setName("tags").setDescription("Comma-separated tags (e.g. announcement, rules)")
+  )
+  .addStringOption(o =>
+    o.setName("excerpt").setDescription("Short teaser shown in the list")
+  )
+  .addStringOption(o =>
+    o.setName("image_url").setDescription("Image URL (optional)")
+  )
+  .addAttachmentOption(o =>
+    o.setName("image_file").setDescription("Or upload an image instead")
+  );
+
+const newsQuick = new SlashCommandBuilder()
+  .setName("news_quick")
+  .setDescription("Quick publish a News article")
+  // REQUIRED first
+  .addStringOption(o =>
+    o.setName("title").setDescription("Title").setRequired(true).setMaxLength(120)
+  )
+  .addStringOption(o =>
+    o.setName("content").setDescription("Markdown content").setRequired(true).setMaxLength(1800)
+  )
+  // OPTIONAL after required
+  .addStringOption(o =>
+    o.setName("tags").setDescription("Comma-separated tags")
+  )
+  .addStringOption(o =>
+    o.setName("excerpt").setDescription("Short teaser")
+  )
+  .addStringOption(o =>
+    o.setName("image_url").setDescription("Image URL")
+  );
+
+/* --- Your existing commands --- */
+const baseCommands = [
   new SlashCommandBuilder().setName("ping").setDescription("Check if the bot is responsive"),
 
   new SlashCommandBuilder()
@@ -50,7 +97,10 @@ const commands = [
     .addUserOption(o =>
       o.setName("user").setDescription("Target user (mods can edit anyone)")
     ),
-].map(c => c.toJSON());
+];
+
+/* --- Final payload: include the two news commands --- */
+const commands = [...baseCommands, publishNews, newsQuick].map(c => c.toJSON());
 
 (async () => {
   try {

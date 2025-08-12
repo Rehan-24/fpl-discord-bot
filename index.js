@@ -44,6 +44,17 @@ async function updateProfile(discordId, fields, actorId) {
   return data;
 }
 
+async function postNews(payload) {
+  // expects backend /api/news from your FastAPI router
+  const res = await axios.post(`${BASE}/news`, payload, { headers: API_HEADERS, timeout: 20000 });
+  return res.data; // { ok: true, id: "<slug-YYYY-MM-DD>" }
+}
+
+function firstAttachmentUrl(interaction) {
+  const att = interaction.options?.getAttachment?.("image_file");
+  return att?.url || null;
+}
+
 function makeEmbed(profile) {
   const imgRaw = profile.dynamic_image_url || profile.image_url;
   const img = normalizeUrl(imgRaw);
@@ -85,12 +96,12 @@ client.once(Events.ClientReady, async (c) => {
 // Interaction handler
 client.on(Events.InteractionCreate, async (interaction) => {
     
-    if (interaction.commandName === "ping") {
+  if (interaction.commandName === "ping") {
     await interaction.reply({ content: "Pong!", ephemeral: true });
     return;
-    }
+  }
   
-    if (!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
   try {
     // /me
@@ -156,6 +167,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const res = await updateProfile(targetId, { image_url: url }, actorId);
     await interaction.editReply(`✅ Image URL updated for <@${targetId}>.`);
     return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
+    }
+
+    if (interaction.commandName === "publish_news") {
+      const title = interaction.options.getString("title", true);
+      const tags = interaction.options.getString("tags") || "";
+      const excerpt = interaction.options.getString("excerpt") || "";
+      const imageUrlInput = interaction.options.getString("image_url") || "";
+      const imageFromFile = firstAttachmentUrl(interaction);
+      const image_url = imageFromFile || imageUrlInput || null;
+      const content = interaction.options.getString("content", true);
+
+      await interaction.deferReply({ ephemeral: false });
+      const result = await postNews({
+        title,
+        tags,                      // string accepted by backend; it's split there
+        excerpt,
+        image_url,
+        content_markdown: content, // backend converts to HTML
+        author: `${interaction.user.tag} (${interaction.user.id})`,
+      });
+
+      const url = `${SITE_BASE}/news/${result.id}`;
+      return await interaction.editReply(`✅ Published **${title}** — ${url}`);
+    }
+
+    if (interaction.commandName === "news_quick") {
+      const title = interaction.options.getString("title", true);
+      const tags = interaction.options.getString("tags") || "";
+      const content = interaction.options.getString("content", true);
+      const excerpt = interaction.options.getString("excerpt") || "";
+      const image_url = interaction.options.getString("image_url") || null;
+
+      await interaction.deferReply({ ephemeral: false });
+      const result = await postNews({
+        title,
+        tags,
+        excerpt,
+        image_url,
+        content_markdown: content,
+        author: `${interaction.user.tag} (${interaction.user.id})`,
+      });
+
+      const url = `${SITE_BASE}/news/${result.id}`;
+      return await interaction.editReply(`✅ Published **${title}** — ${url}`);
     }
 
   } catch (err) {

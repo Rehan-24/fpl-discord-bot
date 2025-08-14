@@ -144,9 +144,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     /* -------- me -------- */
     if (interaction.commandName === "me") {
-      const userOpt = interaction.options.getUser("user");
-      const display = userOpt ? userOpt.tag : interaction.user.tag;
-      return interaction.reply({ content: `Profile for **${display}** (coming soon)`, ephemeral: true });
+          await interaction.deferReply({ ephemeral: false }); // reply slot reserved
+          const user = interaction.options.getUser("user");
+          const targetId = user?.id || interaction.user.id;
+          const profile = await getProfile(targetId);
+          return await interaction.editReply({ embeds: [makeEmbed(profile)] });
     }
 
     /* -------- setbio -------- */

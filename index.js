@@ -39,7 +39,7 @@ function isModOrAllowed(interaction) {
   // Works only in guilds (not DMs)
   try {
     const member = interaction.member;
-    const hasRole = MOD_ROLE_ID && member?.roles?.cache?.has?.(MOD_ROLE_ID);
+    const hasRole = MOD_ROLE_ID;
     const isWhitelisted = ALLOWED_EDITOR_USER_IDS.includes(interaction.user.id);
     return Boolean(hasRole || isWhitelisted);
   } catch {

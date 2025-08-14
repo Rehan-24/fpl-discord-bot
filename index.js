@@ -5,7 +5,7 @@ const {
 const axios = require("axios");
 
 // ===== CONFIG =====
-const BASE = process.env.BACKEND_URL;
+const BASE = "https://tfpl.onrender.com".replace(/\/+$/, "");
 if (!BASE) throw new Error("BACKEND_URL not set");
 const API_HEADERS = {};
 if (process.env.API_KEY) API_HEADERS["X-Api-Key"] = process.env.API_KEY;

@@ -23,26 +23,72 @@ function normalizeUrl(u) {
 const MOD_IDS = ["626536164236591120"];
 
 function isMod(userId) { return MOD_IDS.includes(String(userId)); }
-function ensureCanEdit(actorId, targetId) {
-  actorId = String(actorId); targetId = String(targetId);
-  if (isMod(actorId)) return;
-  if (actorId === targetId) return;
+
+/**
+ * Decide who we're targeting:
+ * - If slash option "user" is provided => target that Discord user.
+ * - Else if slash option "name" (non-empty) is provided => target by free-text name.
+ * - Else default to self (Discord user).
+ */
+function resolveTarget(interaction) {
+  const userOpt = interaction.options?.getUser?.("user");
+  const nameOpt = interaction.options?.getString?.("name");
+
+  if (userOpt) {
+    const isSelf = userOpt.id === interaction.user.id;
+    return { mode: "discord", isSelf, discordId: userOpt.id, display: `${userOpt.tag}` };
+  }
+
+  if (nameOpt && nameOpt.trim()) {
+    return { mode: "name", isSelf: false, name: nameOpt.trim(), display: nameOpt.trim() };
+  }
+
+  // default to self
+  return { mode: "discord", isSelf: true, discordId: interaction.user.id, display: interaction.user.tag };
+}
+
+function ensureCanEditFlexible(actorId, target) {
+  actorId = String(actorId);
+  if (isMod(actorId)) return; // mods can edit anyone
+  if (target.mode === "discord" && target.discordId === actorId) return; // self-edit OK
   const err = new Error("You can only edit your own profile. Mods can edit anyone.");
   err.status = 403;
   throw err;
 }
 
-async function getProfile(discordId) {
+/* ===== Backend helpers: support discordId OR name ===== */
+async function getProfileByDiscord(discordId) {
   const url = `${BASE}/user/${discordId}`;
   const { data } = await axios.get(url, { headers: API_HEADERS });
   return data;
 }
+async function getProfileByName(name) {
+  const url = `${BASE}/user/by-name`;
+  const { data } = await axios.get(url, { headers: API_HEADERS, params: { name } });
+  return data;
+}
+async function getProfileFlexible(target) {
+  if (target.mode === "discord") return getProfileByDiscord(target.discordId);
+  return getProfileByName(target.name);
+}
 
-async function updateProfile(discordId, fields, actorId) {
+async function updateProfileByDiscord(discordId, fields, actorId) {
   const url = `${BASE}/user/${discordId}`;
-  const headers = { ...API_HEADERS, actor_id: String(actorId) }; // backend can enforce if added
+  const headers = { ...API_HEADERS, actor_id: String(actorId) };
   const { data } = await axios.post(url, fields, { headers });
   return data;
+}
+async function updateProfileByName(name, fields, actorId) {
+  const url = `${BASE}/user/by-name`;
+  const headers = { ...API_HEADERS, actor_id: String(actorId) };
+  const { data } = await axios.post(url, { name, ...fields }, { headers });
+  return data;
+}
+async function updateProfileFlexible(target, fields, actorId) {
+  if (target.mode === "discord") {
+    return updateProfileByDiscord(target.discordId, fields, actorId);
+  }
+  return updateProfileByName(target.name, fields, actorId);
 }
 
 async function postNews(payload) {
@@ -73,7 +119,6 @@ function makeEmbed(profile) {
   return e;
 }
 
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
@@ -96,80 +141,75 @@ client.once(Events.ClientReady, async (c) => {
 
 // Interaction handler
 client.on(Events.InteractionCreate, async (interaction) => {
-    
   if (interaction.commandName === "ping") {
     await interaction.reply({ content: "Pong!", ephemeral: true });
     return;
   }
-  
+
   if (!interaction.isChatInputCommand()) return;
 
   try {
     // /me
     if (interaction.commandName === "me") {
-    await interaction.deferReply({ ephemeral: false }); // reply slot reserved
-    const user = interaction.options.getUser("user");
-    const targetId = user?.id || interaction.user.id;
-    const profile = await getProfile(targetId);
-    return await interaction.editReply({ embeds: [makeEmbed(profile)] });
+      await interaction.deferReply({ ephemeral: false });
+      const target = resolveTarget(interaction); // now supports "name"
+      const profile = await getProfileFlexible(target);
+      return await interaction.editReply({ embeds: [makeEmbed(profile)] });
     }
 
     // /setbio
     if (interaction.commandName === "setbio") {
-    await interaction.deferReply({ ephemeral: true }); // updates can be quiet
-    const text = interaction.options.getString("text", true);
-    const user = interaction.options.getUser("user");
-    const actorId = interaction.user.id;
-    const targetId = user?.id || actorId;
+      await interaction.deferReply({ ephemeral: true });
+      const text = interaction.options.getString("text", true);
+      const target = resolveTarget(interaction); // user OR name OR self
+      const actorId = interaction.user.id;
 
-    ensureCanEdit(actorId, targetId);
-    const res = await updateProfile(targetId, { bio: text }, actorId);
-    await interaction.editReply(`✅ Bio updated for <@${targetId}>.`);
-    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
+      ensureCanEditFlexible(actorId, target);
+      const res = await updateProfileFlexible(target, { bio: text }, actorId);
+      await interaction.editReply(`✅ Bio updated for **${target.display}**.`);
+      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
     }
 
     // /setclub
     if (interaction.commandName === "setclub") {
-    await interaction.deferReply({ ephemeral: true });
-    const club = interaction.options.getString("club", true);
-    const user = interaction.options.getUser("user");
-    const actorId = interaction.user.id;
-    const targetId = user?.id || actorId;
+      await interaction.deferReply({ ephemeral: true });
+      const club = interaction.options.getString("club", true);
+      const target = resolveTarget(interaction);
+      const actorId = interaction.user.id;
 
-    ensureCanEdit(actorId, targetId);
-    const res = await updateProfile(targetId, { favorite_club: club }, actorId);
-    await interaction.editReply(`✅ Favorite club updated for <@${targetId}>.`);
-    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
+      ensureCanEditFlexible(actorId, target);
+      const res = await updateProfileFlexible(target, { favorite_club: club }, actorId);
+      await interaction.editReply(`✅ Favorite club updated for **${target.display}**.`);
+      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
     }
 
     // /setsocial
     if (interaction.commandName === "setsocial") {
-    await interaction.deferReply({ ephemeral: true });
-    const url = interaction.options.getString("url", true);
-    const user = interaction.options.getUser("user");
-    const actorId = interaction.user.id;
-    const targetId = user?.id || actorId;
+      await interaction.deferReply({ ephemeral: true });
+      const url = interaction.options.getString("url", true);
+      const target = resolveTarget(interaction);
+      const actorId = interaction.user.id;
 
-    ensureCanEdit(actorId, targetId);
-    const res = await updateProfile(targetId, { social_url: url }, actorId);
-    await interaction.editReply(`✅ Social URL updated for <@${targetId}>.`);
-    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
+      ensureCanEditFlexible(actorId, target);
+      const res = await updateProfileFlexible(target, { social_url: url }, actorId);
+      await interaction.editReply(`✅ Social URL updated for **${target.display}**.`);
+      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
     }
 
     // /setimage
     if (interaction.commandName === "setimage") {
-    await interaction.deferReply({ ephemeral: true });
-    const url = interaction.options.getString("url", true);
-    const user = interaction.options.getUser("user");
-    const actorId = interaction.user.id;
-    const targetId = user?.id || actorId;
+      await interaction.deferReply({ ephemeral: true });
+      const url = interaction.options.getString("url", true);
+      const target = resolveTarget(interaction);
+      const actorId = interaction.user.id;
 
-    ensureCanEdit(actorId, targetId);
-    const res = await updateProfile(targetId, { image_url: url }, actorId);
-    await interaction.editReply(`✅ Image URL updated for <@${targetId}>.`);
-    return await interaction.followUp({ embeds: [makeEmbed(res.user)] });
+      ensureCanEditFlexible(actorId, target);
+      const res = await updateProfileFlexible(target, { image_url: url }, actorId);
+      await interaction.editReply(`✅ Image URL updated for **${target.display}**.`);
+      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
     }
 
+    // Publishing: still restricted to mods (uses ensureCanEditFlexible with dummy target)
     if (interaction.commandName === "publish_news") {
       const title = interaction.options.getString("title", true);
       const tags = interaction.options.getString("tags") || "";
@@ -178,9 +218,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const imageFromFile = firstAttachmentUrl(interaction);
       const image_url = imageFromFile || imageUrlInput || null;
       const content = interaction.options.getString("content", true);
-	  const actorId = interaction.user.id;
-	  
-	  ensureCanEdit(actorId, 0);
+      const actorId = interaction.user.id;
+
+      // Require mod: emulate a non-self edit to trigger mod requirement
+      ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
 
       await interaction.deferReply({ ephemeral: false });
       const result = await postNews({
@@ -202,9 +243,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const content = interaction.options.getString("content", true);
       const excerpt = interaction.options.getString("excerpt") || "";
       const image_url = interaction.options.getString("image_url") || null;
-	  const actorId = interaction.user.id;
-	  
-	  ensureCanEdit(actorId, 0);
+      const actorId = interaction.user.id;
+
+      // Require mod
+      ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
 
       await interaction.deferReply({ ephemeral: false });
       const result = await postNews({

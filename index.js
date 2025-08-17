@@ -134,7 +134,107 @@ async function registerCommandsOnReady() {
   }
 }
 
+
+
+function formatInTZ(date, tz) {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  } catch (_) {
+    return date.toISOString();
+  }
+}
+// ===== Deadline reminders (FPL deadlines) =====
+const REMINDER_CHANNEL_ID = process.env.DEADLINE_CHANNEL_ID;
+const TZ = process.env.TZ || "America/Los_Angeles";
+
+async function getNextFplEvent() {
+  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+  const now = new Date();
+  const events = data?.events || [];
+  const upcoming = events
+    .filter(e => e.deadline_time && new Date(e.deadline_time) > now)
+    .sort((a, b) => new Date(a.deadline_time) - new Date(b.deadline_time));
+  return upcoming[0] || null;
+}
+
+function formatInTZ(date) {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: TZ,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  } catch (_) {
+    return date.toISOString();
+  }
+}
+
+let __scheduledTimeouts = [];
+function clearReminders() {
+  for (const t of __scheduledTimeouts) clearTimeout(t);
+  __scheduledTimeouts = [];
+}
+
+async function scheduleDeadlineReminders() {
+  if (!REMINDER_CHANNEL_ID) {
+    console.log("DEADLINE_CHANNEL_ID not set — skipping deadline reminders.");
+    return;
+  }
+  let channel;
+  try {
+    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
+  } catch (e) {
+    console.log("Unable to fetch reminder channel:", e?.message || e);
+    return;
+  }
+  const ev = await getNextFplEvent();
+  if (!ev) {
+    console.log("No upcoming FPL event found to schedule.");
+    return;
+  }
+  const deadline = new Date(ev.deadline_time); // UTC from FPL API
+  const oneDayBefore = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
+  const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
+  const now = new Date();
+
+  clearReminders();
+
+  const scheduleAt = (when, label) => {
+    const ms = when.getTime() - now.getTime();
+    if (ms <= 0) return;
+    const t = setTimeout(async () => {
+      try {
+        await channel.send(
+          `🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`
+        );
+      } catch (e) {
+        console.error("Failed to send reminder:", e?.message || e);
+      }
+    }, ms);
+    __scheduledTimeouts.push(t);
+  };
+
+  scheduleAt(oneDayBefore, "24-hour");
+  scheduleAt(oneHourBefore, "1-hour");
+
+  // After the deadline passes, re-run scheduling to pick up the next GW.
+  const reschedMs = Math.max(deadline.getTime() - now.getTime() + 60 * 1000, 60 * 60 * 1000);
+  __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
+
+  console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
+}
 client.once(Events.ClientReady, async (c) => {
+  try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   console.log(`Logged in as ${c.user.tag}`);
   await registerCommandsOnReady();
 });
@@ -150,7 +250,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   try {
     // /me
-    if (interaction.commandName === "me") {
+    
+    // /next_deadline
+    if (interaction.commandName === "next_deadline") {
+      await interaction.deferReply({ ephemeral: false });
+      const ev = await getNextFplEvent();
+      if (!ev) {
+        return await interaction.editReply("No upcoming FPL deadline found.");
+      }
+      const deadline = new Date(ev.deadline_time); // UTC
+      const pst = formatInTZ(deadline, "America/Los_Angeles");
+      const est = formatInTZ(deadline, "America/New_York");
+      const ms = deadline.getTime() - Date.now();
+      const hours = Math.max(0, Math.floor(ms / (1000*60*60)));
+      const mins = Math.max(0, Math.floor((ms % (1000*60*60)) / (1000*60)));
+      const remaining = `${hours}h ${mins}m`;
+
+      return await interaction.editReply(
+        `🚨 **GW${ev.id} deadline**\n${pst} PST / ${est} EST\nTime remaining: ${remaining}`
+      );
+    }
+
+if (interaction.commandName === "me") {
       await interaction.deferReply({ ephemeral: false });
       const target = resolveTarget(interaction); // now supports "name"
       const profile = await getProfileFlexible(target);

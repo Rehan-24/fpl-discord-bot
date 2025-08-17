@@ -1,6 +1,12 @@
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
+// /next_deadline — show next FPL deadline (PST/EST)
+const nextDeadline = new SlashCommandBuilder()
+  .setName("next_deadline")
+  .setDescription("Show the next FPL deadline with PST/EST times");
+
+
 /* -------------------- News commands -------------------- */
 // /publish_news — required first, then optional
 const publishNews = new SlashCommandBuilder()

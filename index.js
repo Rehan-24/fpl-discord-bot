@@ -791,53 +791,94 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName === "setbio") {
       await interaction.deferReply({ ephemeral: true });
       const text = interaction.options.getString("text", true);
+
       const target = resolveTarget(interaction); // user OR name OR self
       const actorId = interaction.user.id;
 
-      ensureCanEditFlexible(actorId, target);
-      const res = await updateProfileFlexible(target, { bio: text }, actorId);
-      await interaction.editReply(`✅ Bio updated for **${target.display}**.`);
-      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      try {
+        ensureCanEditFlexible(actorId, target); // only self or mod
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
+      }
+
+      try {
+        const res = await updateProfileFlexible(target, { bio: text }, actorId);
+        await interaction.editReply(`✅ Bio updated for **${target.display}**.`);
+        return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
+      }
     }
 
     // /setclub
     if (interaction.commandName === "setclub") {
       await interaction.deferReply({ ephemeral: true });
       const club = interaction.options.getString("club", true);
+
       const target = resolveTarget(interaction);
       const actorId = interaction.user.id;
 
-      ensureCanEditFlexible(actorId, target);
-      const res = await updateProfileFlexible(target, { favorite_club: club }, actorId);
-      await interaction.editReply(`✅ Favorite club updated for **${target.display}**.`);
-      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      try {
+        ensureCanEditFlexible(actorId, target); // only self or mod
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
+      }
+
+      try {
+        const res = await updateProfileFlexible(target, { favorite_club: club }, actorId);
+        await interaction.editReply(`✅ Favorite club updated for **${target.display}**.`);
+        return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
+      }
     }
 
     // /setsocial
     if (interaction.commandName === "setsocial") {
       await interaction.deferReply({ ephemeral: true });
       const url = interaction.options.getString("url", true);
+
       const target = resolveTarget(interaction);
       const actorId = interaction.user.id;
 
-      ensureCanEditFlexible(actorId, target);
-      const res = await updateProfileFlexible(target, { social_url: url }, actorId);
-      await interaction.editReply(`✅ Social URL updated for **${target.display}**.`);
-      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      try {
+        ensureCanEditFlexible(actorId, target); // only self or mod
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
+      }
+
+      try {
+        const res = await updateProfileFlexible(target, { social_url: url }, actorId);
+        await interaction.editReply(`✅ Social URL updated for **${target.display}**.`);
+        return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
+      }
     }
 
     // /setimage
     if (interaction.commandName === "setimage") {
       await interaction.deferReply({ ephemeral: true });
       const url = interaction.options.getString("url", true);
+
       const target = resolveTarget(interaction);
       const actorId = interaction.user.id;
 
-      ensureCanEditFlexible(actorId, target);
-      const res = await updateProfileFlexible(target, { image_url: url }, actorId);
-      await interaction.editReply(`✅ Image URL updated for **${target.display}**.`);
-      return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      try {
+        ensureCanEditFlexible(actorId, target); // only self or mod
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
+      }
+
+      try {
+        const res = await updateProfileFlexible(target, { image_url: url }, actorId);
+        await interaction.editReply(`✅ Image updated for **${target.display}**.`);
+        return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
+      }
     }
+
 
     // Publishing: still restricted to mods (uses ensureCanEditFlexible with dummy target)
     if (interaction.commandName === "publish_news") {

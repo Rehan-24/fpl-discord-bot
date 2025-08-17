@@ -134,11 +134,6 @@ async function registerCommandsOnReady() {
   }
 }
 
-
-
-
-
-
 // ===== Manager mapping from backend =====
 const MANAGERS_API = process.env.MANAGERS_API || `${BASE}/managers`;
 
@@ -755,6 +750,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const target = resolveTarget(interaction); // now supports "name"
       const profile = await getProfileFlexible(target);
       return await interaction.editReply({ embeds: [makeEmbed(profile)] });
+    }
+
+    // /next_deadline
+    if (interaction.commandName === "next_deadline") {
+      await interaction.deferReply({ ephemeral: false });
+
+      const ev = await getNextFplEvent();
+      if (!ev) {
+        return await interaction.editReply("No upcoming FPL deadline found.");
+      }
+
+      const deadline = new Date(ev.deadline_time); // UTC from bootstrap-static
+      const pst = formatInTZ(deadline, "America/Los_Angeles");
+      const est = formatInTZ(deadline, "America/New_York");
+
+      const ms = deadline.getTime() - Date.now();
+      const hours = Math.max(0, Math.floor(ms / (1000 * 60 * 60)));
+      const mins = Math.max(0, Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60)));
+      const remaining = `${hours}h ${mins}m`;
+
+      return await interaction.editReply(
+        `🚨 **GW${ev.id} deadline**\n${pst} PST / ${est} EST\nTime remaining: ${remaining}`
+      );
     }
 
     // /setbio

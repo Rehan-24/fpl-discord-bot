@@ -57,33 +57,24 @@ function ensureCanEditFlexible(actorId, target) {
 }
 
 /* ===== Backend helpers: support discordId OR name ===== */
-async function getProfileByDiscord(discordId) {
-  const url = `${BASE}/user/${discordId}`;
-  const { data } = await axios.get(url, { headers: API_HEADERS });
-  return data;
-}
-async function getProfileByName(name) {
-  const url = `${BASE}/user/by-name`;
-  const { data } = await axios.get(url, { headers: API_HEADERS, params: { name } });
-  return data;
-}
 async function getProfileFlexible(target) {
   if (target.mode === "discord") return getProfileByDiscord(target.discordId);
   return getProfileByName(target.name);
 }
 
-async function updateProfileByDiscord(discordId, fields, actorId) {
-  const url = `${BASE}/user/${discordId}`;
+async function getProfile(idOrName) {
+  const url = `${BASE}/user/${encodeURIComponent(String(idOrName).trim())}`;
+  const { data } = await axios.get(url, { headers: API_HEADERS });
+  return data;
+}
+
+async function updateProfile(idOrName, fields, actorId) {
+  const url = `${BASE}/user/${encodeURIComponent(String(idOrName).trim())}`;
   const headers = { ...API_HEADERS, actor_id: String(actorId) };
   const { data } = await axios.post(url, fields, { headers });
   return data;
 }
-async function updateProfileByName(name, fields, actorId) {
-  const url = `${BASE}/user/by-name`;
-  const headers = { ...API_HEADERS, actor_id: String(actorId) };
-  const { data } = await axios.post(url, { name, ...fields }, { headers });
-  return data;
-}
+
 async function updateProfileFlexible(target, fields, actorId) {
   if (target.mode === "discord") {
     return updateProfileByDiscord(target.discordId, fields, actorId);
@@ -757,33 +748,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // /me
     if (interaction.commandName === "me") {
-        await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply({ ephemeral: false });
 
-        const userOpt = interaction.options.getUser("user");
-        const nameOpt = interaction.options.getString("name");
+      const userOpt = interaction.options.getUser?.("user");
+      const nameOpt = interaction.options.getString?.("name");
+      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
 
-        let manager;
-
-        if (userOpt) {
-          // lookup by Discord ID
-          manager = MANAGER_MAP[String(userOpt.id)];
-        } else if (nameOpt) {
-          // lookup by manager name (case insensitive)
-          const nameLower = nameOpt.toLowerCase();
-          manager = Object.values(MANAGER_MAP).find(
-            m => m.name && m.name.toLowerCase() === nameLower
-          );
-        } else {
-          // default to the user themselves
-          manager = MANAGER_MAP[String(interaction.user.id)];
-        }
-
-        if (!manager) {
-          return await interaction.editReply("❌ Could not find that manager.");
-        }
-
-      return await interaction.editReply({ embeds: [makeEmbed(profile)] });
+      try {
+        const profile = await getProfile(idOrName);
+        return await interaction.editReply({ embeds: [makeEmbed(profile)] });
+      } catch (e) {
+        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        return await interaction.editReply(`❌ Could not find a profile for **${display}**.`);
+      }
     }
+
 
     // /next_deadline
     if (interaction.commandName === "next_deadline") {

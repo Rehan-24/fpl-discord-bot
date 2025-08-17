@@ -836,21 +836,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // /setsocial
     if (interaction.commandName === "setsocial") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ ephemeral: false });
       const url = interaction.options.getString("url", true);
 
-      const target = resolveTarget(interaction);
+      const userOpt = interaction.options.getUser?.("user");
+      const nameOpt = interaction.options.getString?.("name");
+      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
 
       try {
-        ensureCanEditFlexible(actorId, target); // only self or mod
+        ensureCanEditFlexible(actorId, idOrName); // only self or mod
       } catch (e) {
         return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
       }
 
       try {
-        const res = await updateProfile(target, { social_url: url }, actorId);
-        await interaction.editReply(`✅ Social URL updated for **${target.display}**.`);
+        const res = await updateProfile(idOrName, { social_url: url }, actorId);
+        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        await interaction.editReply(`✅ Social URL updated for **${display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
         return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
@@ -859,21 +862,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // /setimage
     if (interaction.commandName === "setimage") {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ ephemeral: false });
       const url = interaction.options.getString("url", true);
 
-      const target = resolveTarget(interaction);
+      const userOpt = interaction.options.getUser?.("user");
+      const nameOpt = interaction.options.getString?.("name");
+      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
 
       try {
-        ensureCanEditFlexible(actorId, target); // only self or mod
+        ensureCanEditFlexible(actorId, idOrName); // only self or mod
       } catch (e) {
         return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
       }
 
       try {
-        const res = await updateProfile(target, { image_url: url }, actorId);
-        await interaction.editReply(`✅ Image updated for **${target.display}**.`);
+        const res = await updateProfile(idOrName, { image_url: url }, actorId);
+        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        await interaction.editReply(`✅ Image updated for **${display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
         return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);

@@ -134,6 +134,11 @@ async function registerCommandsOnReady() {
   }
 }
 
+
+
+
+
+
 // ===== Manager mapping from backend =====
 const MANAGERS_API = process.env.MANAGERS_API || `${BASE}/managers`;
 
@@ -174,7 +179,8 @@ async function refreshManagerDiscordMap() {
 
 // ===== Rivalries support =====
 const fs = require?.("fs");
-const RIVALRIES_FILE = process.env.RIVALRIES_FILE;       // rivalry json file
+const RIVALRIES_FILE = process.env.RIVALRIES_FILE;       // optional path to a JSON file
+const RIVALRIES_JSON = process.env.RIVALRIES_JSON;       // optional JSON string
 let RIVALRIES = [];                                      // [{league?, a_owner?, b_owner?, a_team?, b_team?, label?, reason?}]
 
 function normalizeStr(x){ return String(x||"").trim().toLowerCase(); }
@@ -215,6 +221,18 @@ function rivalryMatches(league, a, b) {
   }
   return null;
 }
+
+function rememberPreviews(league, gw, picks) {
+  if (!__LAST_PREVIEWS[league]) __LAST_PREVIEWS[league] = {};
+  // store simplified fixture-like objects for matching later
+  __LAST_PREVIEWS[league][gw] = picks.map(p => ({
+    aTeam: p.pair[0].team,
+    bTeam: p.pair[1].team,
+    aOwner: p.pair[0].owner,
+    bOwner: p.pair[1].owner
+  }));
+}
+
 // ===== League preview helpers =====
 const LEAGUES = (process.env.LEAGUES || "premier,championship")
   .split(",")
@@ -243,7 +261,9 @@ async function fetchLeagueTable(league) {
   urls.push(
     `${BASE}/league/${league}`,
     `${BASE}/${league}`,
-    `${SITE_BASE}/api/${league}`
+    `${SITE_BASE}/api/${league}`,
+    `${BASE}/${league}_gw38`,
+    `${SITE_BASE}/data/${league}_gw38.json`
   );
   for (const u of urls) {
     try {
@@ -311,10 +331,10 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
       const reason = s.riv
         ? s.riv.reason
         : (s.a.position<=6 && s.b.position<=6
-            ? "It's all to play for between two teams pushing for a place in Europe."
+            ? "Top-of-the-table clash with razor-thin margins."
             : (s.a.position>=teams.length-4 && s.b.position>=teams.length-4
-                ? "A six point swing matters all the more when you're facing the drop!"
-                : "Not much between two teams trying to build momentum!"));
+                ? "Survival six-pointer near the bottom."
+                : "Too close to call on points — momentum will matter."));
       picks.push({ pair:[s.a,s.b], label: `Matchup ${picks.length+1}`, reason });
       if (picks.length>=3) break;
     }
@@ -367,9 +387,9 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
     unique.push({ pair, label, reason });
   }
 
-  if (titlePair) add(titlePair, "Matchup 1", "Top-of-the-table clash: separated by tiny H2H points.");
-  if (midPair) add(midPair, "Matchup 2", "Neck-and-neck in the mid table — almost identical season totals!");
-  if (relPair) add(relPair, "Matchup 3", "Six-pointer Survival — separated by only a whisker near the drop.");
+  if (titlePair) add(titlePair, "Matchup 1", "Top-of-the-table clash: both among the highest scorers and separated by tiny H2H points.");
+  if (midPair) add(midPair, "Matchup 2", "Neck-and-neck in the mid table — almost identical season totals.");
+  if (relPair) add(relPair, "Matchup 3", "Survival six-pointer — separated by a whisker near the bottom.");
 
   // If any missing, fill from remaining neighbor pairs with smallest h2h diff
   if (unique.length < 3) {
@@ -378,7 +398,7 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
       .map(p => ({ p, d: diff(p[0],p[1],'h2hPoints') }))
       .sort((a,b)=>a.d-b.d);
     for (const {p} of byDiff) {
-      add(p, `Matchup ${unique.length+1}`, "Tighter than Eden Hazard's shorts!");
+      add(p, `Matchup ${unique.length+1}`, "Too close to call on points — momentum will matter.");
       if (unique.length >= 3) break;
     }
   }
@@ -445,10 +465,15 @@ function formatInTZ(date) {
 }
 
 let __scheduledTimeouts = [];
+let __LAST_PREVIEWS = {};
+let __LAST_SUMMARY_POSTED_GW = null; // { [league]: { [gw]: [{aTeam,bTeam,aOwner,bOwner}] } }
 function clearReminders() {
   for (const t of __scheduledTimeouts) clearTimeout(t);
   __scheduledTimeouts = [];
 }
+
+
+
 
 // ===== Fixtures fetcher (optional) =====
 // Provide env LEAGUE_FIXTURES_ENDPOINT_<LEAGUE> or LEAGUE_FIXTURES_ENDPOINT (global)
@@ -513,6 +538,140 @@ function normalizeFixture(fx) {
   const bTeam  = fx.away_team  || fx.b_team  || fx.team_b  || fx.team2  || fx.away;
   return { aOwner, bOwner, aTeam, bTeam };
 }
+
+async function summarizePreviousGW(league, prevGw) {
+  const fixtures = await fetchFixtures(league, prevGw);
+  if (!fixtures.length) return null;
+  // Build quick index for points
+  const results = [];
+  let hi = null, lo = null;
+  for (const fx of fixtures) {
+    const aOwner = fx.entry_1_player_name || fx.home_owner || fx.a_owner || fx.owner_a || fx.owner1 || fx.home_manager || fx.aOwner;
+    const bOwner = fx.entry_2_player_name || fx.away_owner || fx.b_owner || fx.owner_b || fx.owner2 || fx.away_manager || fx.bOwner;
+    const aTeam  = fx.entry_1_name        || fx.home_team  || fx.a_team  || fx.team_a  || fx.team1  || fx.home        || fx.aTeam;
+    const bTeam  = fx.entry_2_name        || fx.away_team  || fx.b_team  || fx.team_b  || fx.team2  || fx.away        || fx.bTeam;
+    const aPts   = fx.entry_1_points != null ? fx.entry_1_points : fx.points_a != null ? fx.points_a : fx.a_points;
+    const bPts   = fx.entry_2_points != null ? fx.entry_2_points : fx.points_b != null ? fx.points_b : fx.b_points;
+    // Only include if points available
+    if (aPts == null || bPts == null) continue;
+    results.push({ aOwner, bOwner, aTeam, bTeam, aPts, bPts });
+    // Track highest/lowest scorers across the league
+    const candidates = [
+      { owner: aOwner, team: aTeam, pts: aPts },
+      { owner: bOwner, team: bTeam, pts: bPts },
+    ];
+    for (const c of candidates) {
+      if (!hi || c.pts > hi.pts) hi = c;
+      if (!lo || c.pts < lo.pts) lo = c;
+    }
+  }
+  if (!results.length) return null;
+
+  // Pick which matchups to report: prefer the ones we highlighted before if present
+  const remembered = __LAST_PREVIEWS?.[league]?.[prevGw] || [];
+  let chosen = [];
+  if (remembered.length) {
+    // match by owner or team names
+    for (const r of remembered) {
+      const found = results.find(f =>
+        (f.aOwner && r.aOwner && f.aOwner.toLowerCase() === r.aOwner.toLowerCase() && f.bOwner && r.bOwner && f.bOwner.toLowerCase() === r.bOwner.toLowerCase()) ||
+        (f.aTeam && r.aTeam && f.aTeam.toLowerCase() === r.aTeam.toLowerCase() && f.bTeam && r.bTeam && f.bTeam.toLowerCase() === r.bTeam.toLowerCase())
+      );
+      if (found) chosen.push(found);
+      if (chosen.length >= 3) break;
+    }
+  }
+  // If not enough, fill with closest-score games
+  if (chosen.length < 3) {
+    const remaining = results.filter(fx => !chosen.includes(fx));
+    remaining.sort((x,y)=>Math.abs((x.aPts-x.bPts)) - Math.abs((y.aPts-y.bPts)));
+    for (const r of remaining) {
+      chosen.push(r);
+      if (chosen.length>=3) break;
+    }
+  }
+
+  return { chosen, hi, lo };
+}
+
+function formatPrevGwSummaryMessage(league, prevGw, summary) {
+  const lines = [];
+  lines.push(`📊 GW ${prevGw} SUMMARY: ${league[0].toUpperCase()+league.slice(1)}`);
+
+async function maybePostPrevGwSummaries() {
+  if (!REMINDER_CHANNEL_ID) return;
+  let channel;
+  try {
+    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: cannot fetch channel", e?.message || e);
+    return;
+  }
+
+  // Fetch FPL events
+  let bs;
+  try {
+    const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+    bs = data;
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: bootstrap fetch failed", e?.message || e);
+    return;
+  }
+  const events = bs?.events || [];
+  const prev = events.find(e => e.is_previous);
+  if (!prev) return;
+
+  const prevGw = prev.id;
+  if (__LAST_SUMMARY_POSTED_GW === prevGw) return; // already posted
+
+  const deadline = new Date(prev.deadline_time); // end point for the GW in UTC
+  const now = new Date();
+  const elapsedMs = now.getTime() - deadline.getTime();
+
+  // Wait until 12 hours after the deadline to allow final updates
+  if (elapsedMs < 12*60*60*1000) {
+    // Not yet time
+    return;
+  }
+
+  try {
+    for (const league of LEAGUES) {
+      const sum = await summarizePreviousGW(league, prevGw);
+      const msg = formatPrevGwSummaryMessage(league, prevGw, sum);
+      await channel.send(msg);
+    }
+    __LAST_SUMMARY_POSTED_GW = prevGw;
+    console.log(`Posted previous GW summaries for GW${prevGw}.`);
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: posting failed", e?.message || e);
+  }
+}
+
+  if (!summary || !summary.chosen || !summary.chosen.length) {
+    lines.push("No completed results found.");
+    return lines.join("\n");
+  }
+  lines.push("");
+  const { chosen, hi, lo } = summary;
+  let i = 1;
+  for (const m of chosen) {
+    const aMent = mentionForOwner(m.aOwner);
+    const bMent = mentionForOwner(m.bOwner);
+    const a = `${m.aTeam} (${aMent}) — ${m.aPts}`;
+    const b = `${m.bTeam} (${bMent}) — ${m.bPts}`;
+    const winner = m.aPts === m.bPts ? "Draw" : (m.aPts > m.bPts ? `${m.aTeam}` : `${m.bTeam}`);
+    lines.push(`Matchup ${i}:`);
+    lines.push(`${a}  vs  ${b}`);
+    lines.push(`Winner: **${winner}**`);
+    lines.push("");
+    i++;
+  }
+  if (hi) lines.push(`Highest scorer: **${hi.team} (${mentionForOwner(hi.owner)}) — ${hi.pts}**`);
+  if (lo) lines.push(`Lowest scorer: **${lo.team} (${mentionForOwner(lo.owner)}) — ${lo.pts}**`);
+  return lines.join("\n");
+}
+
+
 async function scheduleDeadlineReminders() {
   if (!REMINDER_CHANNEL_ID) {
     console.log("DEADLINE_CHANNEL_ID not set — skipping deadline reminders.");
@@ -566,6 +725,7 @@ async function scheduleDeadlineReminders() {
       if (!picks.length) continue;
       previews.push(formatPreviewMessage(league, ev.id, picks));
     }
+    rememberPreviews(league, ev.id, picks);
     if (previews.length) {
       await channel.send(previews.join("\n\n"));
     }
@@ -580,10 +740,13 @@ async function scheduleDeadlineReminders() {
   console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
 }
 client.once(Events.ClientReady, async (c) => {
+  try { await maybePostPrevGwSummaries(); } catch (_) {}
+  try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
+
   try { loadRivalriesSync(); } catch (_) {}
 
   try { await refreshManagerDiscordMap(); } catch (_) {}
-  try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
+  try { setInterval(refreshManagerDiscordMap, 30*24*60*60*1000); } catch (_) {}
 
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   console.log(`Logged in as ${c.user.tag}`);

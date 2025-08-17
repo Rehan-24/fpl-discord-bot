@@ -179,8 +179,7 @@ async function refreshManagerDiscordMap() {
 
 // ===== Rivalries support =====
 const fs = require?.("fs");
-const RIVALRIES_FILE = process.env.RIVALRIES_FILE;       // optional path to a JSON file
-const RIVALRIES_JSON = process.env.RIVALRIES_JSON;       // optional JSON string
+const RIVALRIES_FILE = process.env.RIVALRIES_FILE;       // rivalry json file
 let RIVALRIES = [];                                      // [{league?, a_owner?, b_owner?, a_team?, b_team?, label?, reason?}]
 
 function normalizeStr(x){ return String(x||"").trim().toLowerCase(); }
@@ -261,9 +260,7 @@ async function fetchLeagueTable(league) {
   urls.push(
     `${BASE}/league/${league}`,
     `${BASE}/${league}`,
-    `${SITE_BASE}/api/${league}`,
-    `${BASE}/${league}_gw38`,
-    `${SITE_BASE}/data/${league}_gw38.json`
+    `${SITE_BASE}/api/${league}`
   );
   for (const u of urls) {
     try {
@@ -331,10 +328,10 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
       const reason = s.riv
         ? s.riv.reason
         : (s.a.position<=6 && s.b.position<=6
-            ? "Top-of-the-table clash with razor-thin margins."
+            ? "It's all to play for between two teams pushing for a place in Europe."
             : (s.a.position>=teams.length-4 && s.b.position>=teams.length-4
-                ? "Survival six-pointer near the bottom."
-                : "Too close to call on points — momentum will matter."));
+                ? "A six point swing matters all the more when you're facing the drop!"
+                : "Not much between two teams trying to build momentum!"));
       picks.push({ pair:[s.a,s.b], label: `Matchup ${picks.length+1}`, reason });
       if (picks.length>=3) break;
     }
@@ -387,10 +384,11 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
     unique.push({ pair, label, reason });
   }
 
-  if (titlePair) add(titlePair, "Matchup 1", "Top-of-the-table clash: both among the highest scorers and separated by tiny H2H points.");
-  if (midPair) add(midPair, "Matchup 2", "Neck-and-neck in the mid table — almost identical season totals.");
-  if (relPair) add(relPair, "Matchup 3", "Survival six-pointer — separated by a whisker near the bottom.");
 
+  if (titlePair) add(titlePair, "Matchup 1", "Top-of-the-table clash: separated by tiny H2H points.");
+  if (midPair) add(midPair, "Matchup 2", "Neck-and-neck in the mid table — almost identical season totals!");
+  if (relPair) add(relPair, "Matchup 3", "Six-pointer Survival — separated by only a whisker near the drop.");
+ 
   // If any missing, fill from remaining neighbor pairs with smallest h2h diff
   if (unique.length < 3) {
     const byDiff = neighbors
@@ -398,7 +396,7 @@ function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
       .map(p => ({ p, d: diff(p[0],p[1],'h2hPoints') }))
       .sort((a,b)=>a.d-b.d);
     for (const {p} of byDiff) {
-      add(p, `Matchup ${unique.length+1}`, "Too close to call on points — momentum will matter.");
+      add(p, `Matchup ${unique.length+1}`, "Tighter than Eden Hazard's shorts!");
       if (unique.length >= 3) break;
     }
   }
@@ -746,7 +744,7 @@ client.once(Events.ClientReady, async (c) => {
   try { loadRivalriesSync(); } catch (_) {}
 
   try { await refreshManagerDiscordMap(); } catch (_) {}
-  try { setInterval(refreshManagerDiscordMap, 30*24*60*60*1000); } catch (_) {}
+  try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
 
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   console.log(`Logged in as ${c.user.tag}`);

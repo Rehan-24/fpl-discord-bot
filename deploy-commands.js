@@ -137,6 +137,7 @@ const commands = [
   setimage,
   publishNews,
   newsQuick,
+  nextDeadline,
 ].map(c => c.toJSON());
 
 (async () => {

@@ -75,13 +75,6 @@ async function updateProfile(idOrName, fields, actorId) {
   return data;
 }
 
-async function updateProfileFlexible(target, fields, actorId) {
-  if (target.mode === "discord") {
-    return updateProfileByDiscord(target.discordId, fields, actorId);
-  }
-  return updateProfileByName(target.name, fields, actorId);
-}
-
 async function postNews(payload) {
   // expects backend /api/news from your FastAPI router
   const res = await axios.post(`${BASE}/news`, payload, { headers: API_HEADERS, timeout: 20000 });
@@ -802,7 +795,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       try {
-        const res = await updateProfileFlexible(target, { bio: text }, actorId);
+        const res = await updateProfile(target, { bio: text }, actorId);
         await interaction.editReply(`✅ Bio updated for **${target.display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
@@ -825,7 +818,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       try {
-        const res = await updateProfileFlexible(target, { favorite_club: club }, actorId);
+        const res = await updateProfile(target, { favorite_club: club }, actorId);
         await interaction.editReply(`✅ Favorite club updated for **${target.display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
@@ -848,7 +841,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       try {
-        const res = await updateProfileFlexible(target, { social_url: url }, actorId);
+        const res = await updateProfile(target, { social_url: url }, actorId);
         await interaction.editReply(`✅ Social URL updated for **${target.display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
@@ -871,7 +864,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       try {
-        const res = await updateProfileFlexible(target, { image_url: url }, actorId);
+        const res = await updateProfile(target, { image_url: url }, actorId);
         await interaction.editReply(`✅ Image updated for **${target.display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {

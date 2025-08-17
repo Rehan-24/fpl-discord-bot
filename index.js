@@ -789,6 +789,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const nameOpt = interaction.options.getString?.("name");
       const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
+      const text = interaction.options.getString("text", true);
       
 
       try {
@@ -815,6 +816,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const nameOpt = interaction.options.getString?.("name");
       const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
+      const club = interaction.options.getString("club", true);
 
       try {
         ensureCanEditFlexible(actorId, idOrName); // only self or mod

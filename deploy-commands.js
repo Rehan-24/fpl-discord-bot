@@ -62,10 +62,17 @@ const ping = new SlashCommandBuilder()
 
 const meCmd = new SlashCommandBuilder()
   .setName("me")
-  .setDescription("Show a profile")
-  .addUserOption(o =>
-    o.setName("user").setDescription("User to view (defaults to you)")
-  );
+  .setDescription("Show an FPL profile by Discord user or by name")
+  .addUserOption(option =>
+    option.setName("user")
+      .setDescription("Discord user to look up")
+      .setRequired(false)
+  )
+  .addStringOption(option =>
+    option.setName("name")
+      .setDescription("Manager name to look up (if not in Discord)")
+      .setRequired(false)
+  )
 
 const setbio = new SlashCommandBuilder()
   .setName("setbio")

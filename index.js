@@ -746,9 +746,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // /me
     if (interaction.commandName === "me") {
-      await interaction.deferReply({ ephemeral: false });
-      const target = resolveTarget(interaction); // now supports "name"
-      const profile = await getProfileFlexible(target);
+        await interaction.deferReply({ ephemeral: false });
+
+        const userOpt = interaction.options.getUser("user");
+        const nameOpt = interaction.options.getString("name");
+
+        let manager;
+
+        if (userOpt) {
+          // lookup by Discord ID
+          manager = MANAGER_DISCORD_MAP[String(userOpt.id)];
+        } else if (nameOpt) {
+          // lookup by manager name (case insensitive)
+          const nameLower = nameOpt.toLowerCase();
+          manager = Object.values(MANAGER_DISCORD_MAP).find(
+            m => m.name && m.name.toLowerCase() === nameLower
+          );
+        } else {
+          // default to the user themselves
+          manager = MANAGER_DISCORD_MAP[String(interaction.user.id)];
+        }
+
+        if (!manager) {
+          return await interaction.editReply("❌ Could not find that manager.");
+        }
+        
       return await interaction.editReply({ embeds: [makeEmbed(profile)] });
     }
 

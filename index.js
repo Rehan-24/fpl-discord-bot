@@ -186,10 +186,7 @@ function normalizeStr(x){ return String(x||"").trim().toLowerCase(); }
 
 function loadRivalriesSync() {
   try {
-    if (RIVALRIES_JSON) {
-      const arr = JSON.parse(RIVALRIES_JSON);
-      if (Array.isArray(arr)) RIVALRIES = arr;
-    } else if (RIVALRIES_FILE && fs && fs.existsSync(RIVALRIES_FILE)) {
+    if (RIVALRIES_FILE && fs && fs.existsSync(RIVALRIES_FILE)) {
       const txt = fs.readFileSync(RIVALRIES_FILE, "utf-8");
       const arr = JSON.parse(txt);
       if (Array.isArray(arr)) RIVALRIES = arr;
@@ -447,21 +444,6 @@ async function getNextFplEvent() {
   return upcoming[0] || null;
 }
 
-function formatInTZ(date) {
-  try {
-    return new Intl.DateTimeFormat("en-US", {
-      timeZone: TZ,
-      weekday: "short",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    }).format(date);
-  } catch (_) {
-    return date.toISOString();
-  }
-}
-
 let __scheduledTimeouts = [];
 let __LAST_PREVIEWS = {};
 let __LAST_SUMMARY_POSTED_GW = null; // { [league]: { [gw]: [{aTeam,bTeam,aOwner,bOwner}] } }
@@ -694,20 +676,23 @@ async function scheduleDeadlineReminders() {
 
   clearReminders();
 
-  const scheduleAt = (when, label) => {
-    const ms = when.getTime() - now.getTime();
-    if (ms <= 0) return;
-    const t = setTimeout(async () => {
-      try {
-        await channel.send(
-          `🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`
-        );
-      } catch (e) {
-        console.error("Failed to send reminder:", e?.message || e);
-      }
-    }, ms);
-    __scheduledTimeouts.push(t);
-  };
+const scheduleAt = (when, label) => {
+  const ms = when.getTime() - now.getTime();
+  if (ms <= 0) return;
+  const t = setTimeout(async () => {
+    try {
+      const pst = formatInTZ(deadline, "America/Los_Angeles");
+      const est = formatInTZ(deadline, "America/New_York");
+      await channel.send(
+        `🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`
+      );
+    } catch (e) {
+      console.error("Failed to send reminder:", e?.message || e);
+    }
+  }, ms);
+  __scheduledTimeouts.push(t);
+};
+
 
   scheduleAt(oneDayBefore, "24-hour");
 
@@ -721,9 +706,12 @@ async function scheduleDeadlineReminders() {
       const fixtures = await fetchFixtures(league, ev.id);
       const picks = selectDramaticMatchups(teams, {league, fixtures, gw: ev.id});
       if (!picks.length) continue;
+
+      rememberPreviews(league, ev.id, picks);
+
       previews.push(formatPreviewMessage(league, ev.id, picks));
     }
-    rememberPreviews(league, ev.id, picks);
+
     if (previews.length) {
       await channel.send(previews.join("\n\n"));
     }

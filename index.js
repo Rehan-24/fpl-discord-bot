@@ -137,35 +137,46 @@ async function registerCommandsOnReady() {
 // ===== Manager mapping from backend =====
 const MANAGERS_API = process.env.MANAGERS_API || `${BASE}/managers`;
 
+function extractDiscordId(val) {
+  if (!val) return null;
+  const str = String(val);
+  const m = str.match(/\d{17,20}/); // extract snowflake if present
+  return m ? m[0] : null;
+}
+
 async function refreshManagerDiscordMap() {
   try {
     const res = await axios.get(MANAGERS_API, { headers: API_HEADERS });
     const data = res.data;
-    const map = {};
+
+    const map = {};            // key: owner/team, value: discordId or null
+    let total = 0, withId = 0, withoutId = 0;
+
+    const pushRow = (row) => {
+      total++;
+      const owner =
+        row.owner || row.owner_name || row.name || row.manager || row.display_name || row.username;
+      const team = row.team || row.team_name;
+      const rawId =
+        row.discord_id || row.discordId || row.discord || row.discord_user_id || row.discordUserId;
+      const did = extractDiscordId(rawId); // may be null
+
+      if (did) withId++; else withoutId++;
+
+      if (owner) map[owner] = did ?? null;
+      if (team && !map[team]) map[team] = did ?? null; // don't overwrite if owner already set
+    };
+
     if (Array.isArray(data)) {
-      for (const m of data) {
-        const owner =
-          m.owner || m.owner_name || m.name || m.manager || m.display_name || m.username;
-        const team = m.team || m.team_name;
-        const did =
-          m.discord_id || m.discordId || m.discord || m.discord_user_id || m.discordUserId;
-        if (owner && did) map[owner] = String(did);
-        if (team && did && !map[team]) map[team] = String(did); // fallback by team
-      }
+      for (const m of data) pushRow(m);
     } else if (data && typeof data === "object") {
-      // also support object keyed by owner/team
-      for (const [k, v] of Object.entries(data)) {
-        const did =
-          v?.discord_id || v?.discordId || v?.discord || v?.discord_user_id || v?.discordUserId || v;
-        if (did) map[k] = String(did);
-      }
+      for (const [, v] of Object.entries(data)) pushRow(v);
     }
-    if (Object.keys(map).length) {
-      MANAGER_MAP = { ...MANAGER_MAP, ...map };
-      console.log(`Manager map refreshed (${Object.keys(map).length} entries).`);
-    } else {
-      console.log("Manager map fetch returned empty or unrecognized data.");
-    }
+
+    MANAGER_MAP = { ...MANAGER_MAP, ...map };
+    console.log(
+      `Manager map refreshed: ${withId} with IDs / ${withoutId} without (total rows: ${total}).`
+    );
   } catch (e) {
     console.log("Failed to refresh manager map:", e?.response?.status || "", e?.message || e);
   }
@@ -755,22 +766,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (userOpt) {
           // lookup by Discord ID
-          manager = MANAGER_DISCORD_MAP[String(userOpt.id)];
+          manager = MANAGER_MAP[String(userOpt.id)];
         } else if (nameOpt) {
           // lookup by manager name (case insensitive)
           const nameLower = nameOpt.toLowerCase();
-          manager = Object.values(MANAGER_DISCORD_MAP).find(
+          manager = Object.values(MANAGER_MAP).find(
             m => m.name && m.name.toLowerCase() === nameLower
           );
         } else {
           // default to the user themselves
-          manager = MANAGER_DISCORD_MAP[String(interaction.user.id)];
+          manager = MANAGER_MAP[String(interaction.user.id)];
         }
 
         if (!manager) {
           return await interaction.editReply("❌ Could not find that manager.");
         }
-        
+
       return await interaction.editReply({ embeds: [makeEmbed(profile)] });
     }
 

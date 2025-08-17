@@ -782,11 +782,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // /setbio
     if (interaction.commandName === "setbio") {
-      await interaction.deferReply({ ephemeral: true });
-      const text = interaction.options.getString("text", true);
+      
+      await interaction.deferReply({ ephemeral: false });
 
-      const target = resolveTarget(interaction); // user OR name OR self
+      const userOpt = interaction.options.getUser?.("user");
+      const nameOpt = interaction.options.getString?.("name");
+      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
+      
 
       try {
         ensureCanEditFlexible(actorId, target); // only self or mod
@@ -795,8 +798,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       try {
-        const res = await updateProfile(target, { bio: text }, actorId);
-        await interaction.editReply(`✅ Bio updated for **${target.display}**.`);
+        const res = await updateProfile(idOrName, { bio: text }, actorId);
+        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        await interaction.editReply(`✅ Bio updated for **${display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
         return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
@@ -805,21 +809,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // /setclub
     if (interaction.commandName === "setclub") {
-      await interaction.deferReply({ ephemeral: true });
-      const club = interaction.options.getString("club", true);
+      await interaction.deferReply({ ephemeral: false });
 
-      const target = resolveTarget(interaction);
+      const userOpt = interaction.options.getUser?.("user");
+      const nameOpt = interaction.options.getString?.("name");
+      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
 
       try {
-        ensureCanEditFlexible(actorId, target); // only self or mod
+        ensureCanEditFlexible(actorId, idOrName); // only self or mod
       } catch (e) {
         return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
       }
 
       try {
-        const res = await updateProfile(target, { favorite_club: club }, actorId);
-        await interaction.editReply(`✅ Favorite club updated for **${target.display}**.`);
+        const res = await updateProfile(idOrName, { favorite_club: club }, actorId);
+        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        await interaction.editReply(`✅ Favorite club updated for **${display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {
         return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);

@@ -245,6 +245,7 @@ async function fetchLeagueTable(league) {
   }
   // Try backend then site fallbacks
   urls.push(
+    `${BASE}/standings?league=${league}`,     // <-- NEW: your FastAPI route
     `${BASE}/league/${league}`,
     `${BASE}/${league}`,
     `${SITE_BASE}/api/${league}`
@@ -253,7 +254,12 @@ async function fetchLeagueTable(league) {
     try {
       const { data } = await axios.get(u);
       // Expect array of teams or {teams:[...]}
-      const arr = Array.isArray(data) ? data : (data.teams || data.table || data.rows || []);
+      // handle nested shapes, especially { data: { rows: [...] } }
+      const arr =
+        Array.isArray(data) ? data :
+        Array.isArray(data?.rows) ? data.rows :
+        Array.isArray(data?.data?.rows) ? data.data.rows :
+        (data?.teams || data?.table || []);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
       /* try next */
@@ -265,12 +271,12 @@ async function fetchLeagueTable(league) {
 // Basic normalize to known fields
 function normalizeTeams(rows) {
   return rows.map((r, i) => ({
-    position: Number(r.position || r.rank || i + 1),
-    team: r.team || r.team_name || r.name || "Unknown Team",
-    owner: r.owner || r.manager || r.owner_name || r.user || r.coach || "Unknown",
-    totalScore: Number(r.total_score || r.score || r.total || r.season_points || 0),
-    h2hPoints: Number(r.points || r.h2h_points || r.h2h || 0),
-    value: Number(r.value || r.team_value || 0),
+    position: Number(r.Position ?? r.position ?? r.rank ?? i + 1),
+    team: r.Team ?? r.team ?? r.team_name ?? r.name ?? "Unknown Team",
+    owner: r.Owner ?? r.owner ?? r.manager ?? r.owner_name ?? r.user ?? r.coach ?? "Unknown",
+    totalScore: Number(r.Score ?? r.total_score ?? r.total ?? r.season_points ?? 0),
+    h2hPoints: Number(r.Points ?? r.points ?? r.h2h_points ?? r.h2h ?? 0),
+    value: Number(r["Current Team Value"] ?? r.value ?? r.team_value ?? 0),
     recent: r.form || r.recent || "",
   })).sort((a,b)=>a.position-b.position);
 }

@@ -70,7 +70,7 @@ async function getProfile(idOrName) {
 
 async function updateProfile(idOrName, fields, actorId) {
   const url = `${BASE}/user/${encodeURIComponent(String(idOrName).trim())}`;
-  const headers = { ...API_HEADERS, actor_id: String(actorId) };
+  const headers = { ...API_HEADERS, Actor_Id: String(actorId) };
   const { data } = await axios.post(url, fields, { headers });
   return data;
 }
@@ -793,7 +793,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
 
       try {
-        ensureCanEditFlexible(actorId, target); // only self or mod
+        ensureCanEditFlexible(actorId, idOrName); // only self or mod
       } catch (e) {
         return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
       }

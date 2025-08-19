@@ -70,7 +70,7 @@ async function getProfile(idOrName) {
 
 async function updateProfile(idOrName, fields, actorId) {
   const url = `${BASE}/user/${encodeURIComponent(String(idOrName).trim())}`;
-  const headers = { ...API_HEADERS, 'actor_id': String(actorId) };
+  const headers = { ...API_HEADERS, 'X-Actor-Id': String(actorId) };
   const { data } = await axios.post(url, fields, { headers });
   return data;
 }

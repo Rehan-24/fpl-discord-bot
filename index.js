@@ -820,19 +820,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const userOpt = interaction.options.getUser?.("user");
       const nameOpt = interaction.options.getString?.("name");
-      const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
+      //const idOrName = userOpt ? userOpt.id : (nameOpt || interaction.user.id);
       const actorId = interaction.user.id;
       const club = interaction.options.getString("club", true);
+      const target = resolveTarget(interaction); // user/name/self
 
       try {
-        ensureCanEditFlexible(actorId, idOrName); // only self or mod
+        ensureCanEditFlexible(actorId, target); // only self or mod
       } catch (e) {
         return await interaction.editReply(`❌ ${e.message || "You don’t have permission to edit this profile."}`);
       }
 
       try {
+        const idOrName = target.mode === "discord" ? target.discordId : target.name;
         const res = await updateProfile(idOrName, { favorite_club: club }, actorId);
-        const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        //const display = userOpt ? userOpt.tag : (nameOpt || interaction.user.tag);
+        const display = target.display;
         await interaction.editReply(`✅ Favorite club updated for **${display}**.`);
         return await interaction.followUp({ embeds: [makeEmbed(res.user || res)] });
       } catch (e) {

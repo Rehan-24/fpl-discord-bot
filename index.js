@@ -75,9 +75,33 @@ async function updateProfile(idOrName, fields, actorId) {
   return data;
 }
 
+function extractError(err) {
+  const d = err?.response?.data?.detail;
+  if (Array.isArray(d)) {
+    // Pydantic-style errors
+    return d.map(e => `${(e.loc || []).join('.')}: ${e.msg}`).join(' | ');
+  }
+  return d || err?.message || "Unknown error";
+}
+
 async function postNews(payload) {
   // expects backend /api/news from your FastAPI router
-  const res = await axios.post(`${BASE}/news`, payload, { headers: API_HEADERS, timeout: 20000 });
+    const normalized = {
+    title: payload.title,
+    excerpt: payload.excerpt || "",
+    image_url: payload.image_url || null,
+    content_markdown: payload.content_markdown, // what your slash command builds
+    // split tags string to array; allow already-array too
+    tags: Array.isArray(payload.tags)
+      ? payload.tags
+      : String(payload.tags || "")
+          .split(/[,\s#]+/)
+          .map(s => s.trim())
+          .filter(Boolean)
+          .slice(0, 12),
+    author: payload.author || null,
+  };
+  const res = await axios.post(`${BASE}/news`, normalized, { headers: API_HEADERS, timeout: 20000 });
   return res.data; // { ok: true, id: "<slug-YYYY-MM-DD>" }
 }
 

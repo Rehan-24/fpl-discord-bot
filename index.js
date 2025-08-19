@@ -618,21 +618,26 @@ async function maybePostPrevGwSummaries() {
     return;
   }
   const events = bs?.events || [];
-  const prev = events.find(e => e.is_previous);
-  if (!prev) return;
 
-  const prevGw = prev.id;
-  if (__LAST_SUMMARY_POSTED_GW === prevGw) return; // already posted
+// Prefer the latest *finished* GW (FPL uses `finished` in v3; code refers to `is_finished` in your note).
+const finished = events
+  .filter(e => e.is_finished === true || e.finished === true)
+  .sort((a, b) => b.id - a.id);
 
-  const deadline = new Date(prev.deadline_time); // end point for the GW in UTC
-  const now = new Date();
-  const elapsedMs = now.getTime() - deadline.getTime();
+const prev = finished[0];
+if (!prev) return;
 
-  // Wait until 12 hours after the deadline to allow final updates
-  if (elapsedMs < 12*60*60*1000) {
-    // Not yet time
-    return;
-  }
+// Optional: Ensure BPS/bonus has been applied.
+if (prev.data_checked === false) return;
+
+const prevGw = prev.id;
+if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
+
+// Optional small safety delay (e.g., 30 minutes) relative to NOW if you want a buffer:
+const now = new Date();
+const firstSeenFinishedAt = now; // could persist in memory if you want
+// If you want: if (now - firstSeenFinishedAt < 30*60*1000) return; // 30 min buffer
+
 
   try {
     for (const league of LEAGUES) {

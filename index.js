@@ -515,6 +515,8 @@ async function fetchFixtures(league, gw) {
               b_owner: fx.entry_2_player_name,
               a_team: fx.entry_1_name,
               b_team: fx.entry_2_name,
+              a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
+              b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null
             });
           }
         }
@@ -802,7 +804,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return await interaction.editReply(`❌ Could not find a profile for **${display}**.`);
       }
     }
-
 
     // /next_deadline
     if (interaction.commandName === "next_deadline") {

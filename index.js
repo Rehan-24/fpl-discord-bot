@@ -765,6 +765,17 @@ async function scheduleDeadlineReminders() {
   console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
 }
 
+client.once(Events.ClientReady, async (c) => {
+  try { await maybePostPrevGwSummaries(); } catch (_) {}
+  try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
+  try { loadRivalriesSync(); } catch (_) {}
+  try { await refreshManagerDiscordMap(); } catch (_) {}
+  try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
+  try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
+  console.log(`Logged in as ${c.user.tag}`);
+  await registerCommandsOnReady();
+});
+
 // Interaction handler
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "ping") {

@@ -597,61 +597,6 @@ async function summarizePreviousGW(league, prevGw) {
 function formatPrevGwSummaryMessage(league, prevGw, summary) {
   const lines = [];
   lines.push(`📊 GW ${prevGw} SUMMARY: ${league[0].toUpperCase()+league.slice(1)}`);
-
-async function maybePostPrevGwSummaries() {
-  if (!REMINDER_CHANNEL_ID) return;
-  let channel;
-  try {
-    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
-  } catch (e) {
-    console.log("maybePostPrevGwSummaries: cannot fetch channel", e?.message || e);
-    return;
-  }
-
-  // Fetch FPL events
-  let bs;
-  try {
-    const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
-    bs = data;
-  } catch (e) {
-    console.log("maybePostPrevGwSummaries: bootstrap fetch failed", e?.message || e);
-    return;
-  }
-  const events = bs?.events || [];
-
-// Prefer the latest *finished* GW (FPL uses `finished` in v3; code refers to `is_finished` in your note).
-const finished = events
-  .filter(e => e.is_finished === true || e.finished === true)
-  .sort((a, b) => b.id - a.id);
-
-const prev = finished[0];
-if (!prev) return;
-
-// Optional: Ensure BPS/bonus has been applied.
-if (prev.data_checked === false) return;
-
-const prevGw = prev.id;
-if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
-
-// Optional small safety delay (e.g., 30 minutes) relative to NOW if you want a buffer:
-const now = new Date();
-const firstSeenFinishedAt = now; // could persist in memory if you want
-// If you want: if (now - firstSeenFinishedAt < 30*60*1000) return; // 30 min buffer
-
-
-  try {
-    for (const league of LEAGUES) {
-      const sum = await summarizePreviousGW(league, prevGw);
-      const msg = formatPrevGwSummaryMessage(league, prevGw, sum);
-      await channel.send(msg);
-    }
-    __LAST_SUMMARY_POSTED_GW = prevGw;
-    console.log(`Posted previous GW summaries for GW${prevGw}.`);
-  } catch (e) {
-    console.log("maybePostPrevGwSummaries: posting failed", e?.message || e);
-  }
-}
-
   if (!summary || !summary.chosen || !summary.chosen.length) {
     lines.push("No completed results found.");
     return lines.join("\n");
@@ -675,6 +620,57 @@ const firstSeenFinishedAt = now; // could persist in memory if you want
   if (lo) lines.push(`Lowest scorer: **${lo.team} (${mentionForOwner(lo.owner)}) — ${lo.pts}**`);
   return lines.join("\n");
 }
+
+async function maybePostPrevGwSummaries() {
+  if (!REMINDER_CHANNEL_ID) return;
+
+  let channel;
+  try {
+    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: cannot fetch channel", e?.message || e);
+    return;
+  }
+
+  // Fetch FPL events
+  let bs;
+  try {
+    const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+    bs = data;
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: bootstrap fetch failed", e?.message || e);
+    return;
+  }
+
+  const events = bs?.events || [];
+  const finished = events
+    .filter(e => e.is_finished === true || e.finished === true)
+    .sort((a, b) => b.id - a.id);
+
+  const prev = finished[0];
+  if (!prev) return;
+
+  // Only post when bonus is applied
+  if (Object.prototype.hasOwnProperty.call(prev, "data_checked") && prev.data_checked === false) {
+    return;
+  }
+
+  const prevGw = prev.id;
+  if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
+
+  try {
+    for (const league of LEAGUES) {
+      const sum = await summarizePreviousGW(league, prevGw);
+      const msg = formatPrevGwSummaryMessage(league, prevGw, sum);
+      await channel.send(msg);
+    }
+    __LAST_SUMMARY_POSTED_GW = prevGw;
+    console.log(`Posted previous GW summaries for GW${prevGw}.`);
+  } catch (e) {
+    console.log("maybePostPrevGwSummaries: posting failed", e?.message || e);
+  }
+}
+
 
 
 async function scheduleDeadlineReminders() {

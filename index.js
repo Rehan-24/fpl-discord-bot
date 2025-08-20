@@ -596,11 +596,21 @@ async function summarizePreviousGW(league, prevGw) {
 
 function formatPrevGwSummaryMessage(league, prevGw, summary) {
   const lines = [];
-  lines.push(`📊 GW ${prevGw} SUMMARY: ${league[0].toUpperCase()+league.slice(1)}`);
+  lines.push(`📊 GW ${prevGw} SUMMARY: ${league[0].toUpperCase() + league.slice(1)}`);
+
+  // If we don't have any chosen matchups, still show hi/lo if available.
   if (!summary || !summary.chosen || !summary.chosen.length) {
-    lines.push("No completed results found.");
+    lines.push("No completed matchups found.");
+    if (summary?.hi) {
+      lines.push(`Highest scorer: **${summary.hi.team} (${mentionForOwner(summary.hi.owner)}) — ${summary.hi.pts}**`);
+    }
+    if (summary?.lo) {
+      lines.push(`Lowest scorer: **${summary.lo.team} (${mentionForOwner(summary.lo.owner)}) — ${summary.lo.pts}**`);
+    }
     return lines.join("\n");
   }
+
+  // Normal path: list the 3 highlighted matchups, then hi/lo
   lines.push("");
   const { chosen, hi, lo } = summary;
   let i = 1;
@@ -621,9 +631,11 @@ function formatPrevGwSummaryMessage(league, prevGw, summary) {
   return lines.join("\n");
 }
 
+
 async function maybePostPrevGwSummaries() {
   if (!REMINDER_CHANNEL_ID) return;
 
+  // Fetch channel
   let channel;
   try {
     channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
@@ -643,6 +655,8 @@ async function maybePostPrevGwSummaries() {
   }
 
   const events = bs?.events || [];
+
+  // Choose the latest *finished* GW (cover both field names)
   const finished = events
     .filter(e => e.is_finished === true || e.finished === true)
     .sort((a, b) => b.id - a.id);
@@ -650,7 +664,7 @@ async function maybePostPrevGwSummaries() {
   const prev = finished[0];
   if (!prev) return;
 
-  // Only post when bonus is applied
+  // Only post when bonus is applied (guard: treat missing property as OK)
   if (Object.prototype.hasOwnProperty.call(prev, "data_checked") && prev.data_checked === false) {
     return;
   }
@@ -673,11 +687,14 @@ async function maybePostPrevGwSummaries() {
 
 
 
+
 async function scheduleDeadlineReminders() {
   if (!REMINDER_CHANNEL_ID) {
     console.log("DEADLINE_CHANNEL_ID not set — skipping deadline reminders.");
     return;
   }
+
+  // Fetch channel
   let channel;
   try {
     channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
@@ -685,80 +702,68 @@ async function scheduleDeadlineReminders() {
     console.log("Unable to fetch reminder channel:", e?.message || e);
     return;
   }
+
+  // Next event (deadline)
   const ev = await getNextFplEvent();
   if (!ev) {
     console.log("No upcoming FPL event found to schedule.");
     return;
   }
+
   const deadline = new Date(ev.deadline_time); // UTC from FPL API
-  const oneDayBefore = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
+  const oneDayBefore  = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
   const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
-  const now = new Date();
 
   clearReminders();
 
-const scheduleAt = (when, label) => {
-  const ms = when.getTime() - now.getTime();
-  if (ms <= 0) return;
-  const t = setTimeout(async () => {
+  // Generic scheduler with optional callback at fire time
+  const scheduleAt = (when, label, fn) => {
+    const ms = when.getTime() - Date.now();
+    if (ms <= 0) return;
+    const t = setTimeout(async () => {
+      try {
+        const pst = formatInTZ(deadline, "America/Los_Angeles");
+        const est = formatInTZ(deadline, "America/New_York");
+        await channel.send(`🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`);
+        if (typeof fn === "function") await fn();
+      } catch (e) {
+        console.error("Failed to send reminder:", e?.message || e);
+      }
+    }, ms);
+    __scheduledTimeouts.push(t);
+  };
+
+  // Schedule the PREVIEW to post **at** T-24h (not immediately)
+  scheduleAt(oneDayBefore, "24-hour", async () => {
     try {
-      const pst = formatInTZ(deadline, "America/Los_Angeles");
-      const est = formatInTZ(deadline, "America/New_York");
-      await channel.send(
-        `🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`
-      );
+      const previews = [];
+      for (const league of LEAGUES) {
+        const rows = await fetchLeagueTable(league);
+        const teams = normalizeTeams(rows);
+        if (!teams.length) continue;
+        const fixtures = await fetchFixtures(league, ev.id);
+        const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
+        if (!picks.length) continue;
+        rememberPreviews(league, ev.id, picks);
+        previews.push(formatPreviewMessage(league, ev.id, picks));
+      }
+      if (previews.length) {
+        await channel.send(previews.join("\n\n"));
+      }
     } catch (e) {
-      console.error("Failed to send reminder:", e?.message || e);
+      console.log("Preview generation failed:", e?.message || e);
     }
-  }, ms);
-  __scheduledTimeouts.push(t);
-};
+  });
 
-
-  scheduleAt(oneDayBefore, "24-hour");
-
-  // Also send GW previews per league at 24h
-  try {
-    const previews = [];
-    for (const league of LEAGUES) {
-      const rows = await fetchLeagueTable(league);
-      const teams = normalizeTeams(rows);
-      if (!teams.length) continue;
-      const fixtures = await fetchFixtures(league, ev.id);
-      const picks = selectDramaticMatchups(teams, {league, fixtures, gw: ev.id});
-      if (!picks.length) continue;
-
-      rememberPreviews(league, ev.id, picks);
-
-      previews.push(formatPreviewMessage(league, ev.id, picks));
-    }
-
-    if (previews.length) {
-      await channel.send(previews.join("\n\n"));
-    }
-  } catch (e) { console.log("Preview generation failed:", e?.message || e); }
-
+  // Keep the T-1h reminder
   scheduleAt(oneHourBefore, "1-hour");
 
   // After the deadline passes, re-run scheduling to pick up the next GW.
-  const reschedMs = Math.max(deadline.getTime() - now.getTime() + 60 * 1000, 60 * 60 * 1000);
+  const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
   __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
 
   console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
 }
-client.once(Events.ClientReady, async (c) => {
-  try { await maybePostPrevGwSummaries(); } catch (_) {}
-  try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
-
-  try { loadRivalriesSync(); } catch (_) {}
-
-  try { await refreshManagerDiscordMap(); } catch (_) {}
-  try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
-
-  try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
-  console.log(`Logged in as ${c.user.tag}`);
-  await registerCommandsOnReady();
-});
 
 // Interaction handler
 client.on(Events.InteractionCreate, async (interaction) => {

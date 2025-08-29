@@ -105,13 +105,13 @@ function extractError(err) {
 }
 
 async function postNews(payload) {
-  // expects backend /api/news from your FastAPI router
-    const normalized = {
+  // accepts either content_html or content_markdown
+  const normalized = {
     title: payload.title,
     excerpt: payload.excerpt || "",
     image_url: payload.image_url || null,
-    content_markdown: payload.content_markdown, // what your slash command builds
-    // split tags string to array; allow already-array too
+    content_html: payload.content_html || null,
+    content_markdown: payload.content_markdown || null,
     tags: Array.isArray(payload.tags)
       ? payload.tags
       : String(payload.tags || "")
@@ -122,7 +122,7 @@ async function postNews(payload) {
     author: payload.author || null,
   };
   const res = await axios.post(`${BASE}/news`, normalized, { headers: API_HEADERS, timeout: 20000 });
-  return res.data; // { ok: true, id: "<slug-YYYY-MM-DD>" }
+  return res.data;
 }
 
 function firstAttachmentUrl(interaction) {
@@ -795,6 +795,44 @@ function formatPrevGwSummaryMessage(league, prevGw, summary) {
   return lines.join("\n");
 }
 
+function htmlEscape(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+// turn **bold** into <strong>bold</strong>
+function mdBoldToHtml(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderLeagueHtml(league, rawMsg) {
+  // Drop the leading "📊 GWx SUMMARY: League" header if present
+  const cleaned = rawMsg.replace(/^📊\s*GW\s*\d+\s*SUMMARY:\s*[^\n]+\n?/i, "").trim();
+  const lines = cleaned.split(/\r?\n/);
+
+  const title = league[0].toUpperCase() + league.slice(1);
+  const out = [`<h3>📊 ${htmlEscape(title)}</h3>`];
+
+  for (let ln of lines) {
+    if (!ln.trim()) continue;
+
+    // Bold+italicize "Matchup #:" lines
+    if (/^Matchup\s*\d+:/i.test(ln)) {
+      const body = mdBoldToHtml(htmlEscape(ln));
+      out.push(`<p><strong><em>${body}</em></strong></p>`);
+      continue;
+    }
+
+    // Everything else: escape + bold conversion
+    const body = mdBoldToHtml(htmlEscape(ln));
+    out.push(`<p>${body}</p>`);
+  }
+
+  return out.join("\n");
+}
+
 
 async function maybePostPrevGwSummaries() {
   if (!REMINDER_CHANNEL_ID) return;
@@ -849,26 +887,16 @@ async function maybePostPrevGwSummaries() {
     // 2) Also publish a website article that aggregates both leagues
     // Title: "GW# Reviews"
     const title = `GW${prevGw} Reviews`;
-    const excerpt =
-      "Review the biggest matchups and see who scored the most (and least) this week!";
+    const excerpt = "Review the biggest matchups and see who scored the most (and least) this week!";
+    const content_html = leagueMsgs
+      .map(({ league, msg }) => renderLeagueHtml(league, msg))
+      .join("\n<hr/>\n");
 
-    // Make a clean, nicely-formatted Markdown body from the Discord messages.
-    // We keep the content but give each league a Markdown heading.
-    const content_markdown = leagueMsgs
-      .map(({ league, msg }) => {
-        const header = `## ${league[0].toUpperCase() + league.slice(1)}`;
-        // Drop the leading " GWx SUMMARY: ..." line if present to avoid duplicate headings.
-        const cleaned = msg.replace(/^📊\s*GW\s*\d+\s*SUMMARY:\s*[^\n]+\n?/i, "").trim();
-        return `${header}\n\n${cleaned}`;
-      })
-      .join("\n\n---\n\n");
-
-    // Tag the article so it’s easy to find
     await postNews({
       title,
       excerpt,
       image_url: WEEKLY_REVIEW_IMAGE,
-      content_markdown,
+      content_html,                           // <-- HTML, not markdown
       tags: [WEEKLY_REVIEW_TAG],
     }).catch(e => console.log("postNews (weekly reviews) failed:", e?.message || e));
 

@@ -1074,147 +1074,128 @@ function fmtPrice(n) {
   return `£${p.toFixed(1)}m`;
 }
 
+// --- helpers (put near your other top-level helpers) ---
+function normalizePlayerKey(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+// Cache FPL team map: web_name -> team short_name
+let __TEAM_MAP_CACHE = null;
+async function fetchFplTeamMap() {
+  if (__TEAM_MAP_CACHE) return __TEAM_MAP_CACHE;
+
+  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/", {
+    timeout: 20000,
+    headers: { "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)" }
+  });
+
+  const teams = {};
+  for (const t of (data?.teams || [])) {
+    teams[t.id] = t.short_name || t.name || "";
+  }
+
+  const byName = {}; // normalized web_name -> short team code
+  for (const p of (data?.elements || [])) {
+    const key = normalizePlayerKey(p.web_name);
+    byName[key] = teams[p.team] || "";
+  }
+
+  __TEAM_MAP_CACHE = byName;
+  return byName;
+}
+
+// Extract the "Summary of Predictions" section and read player cards
+function parseSummaryFromLiveFPL(html) {
+  const $ = cheerio.load(html);
+
+  // Find "Summary of Predictions" heading and collect nodes until the next big section
+  const hdr = $("h1,h2,h3,h4").filter((_, el) =>
+    /summary of predictions/i.test($(el).text())
+  ).first();
+
+  if (!hdr.length) return [];
+
+  const blockNodes = [];
+  let n = hdr[0].nextSibling;
+  while (n) {
+    // stop at the start of the big "All Players" table/section
+    if (n.type === "tag") {
+      const txt = $(n).text().trim();
+      if (/^player\s+progress/i.test(txt) || /^all\s+players/i.test(txt)) break;
+    }
+    blockNodes.push(n);
+    n = n.nextSibling;
+  }
+
+  const section = $(blockNodes);
+  const out = [];
+
+  // Each player card usually has an h5/h6 (player name),
+  // a line with position + "£<price>", and a line with "<percent>%"
+  section.find("h5,h6").each((_, h) => {
+    const name = $(h).text().trim();
+    if (!name) return;
+
+    // Use parent container text as a cheap way to grab price & percent
+    const txt = $(h).parent().text().replace(/\s+/g, " ").trim();
+
+    // Price like "£5.6" or "£10.4"
+    const mPrice = txt.match(/£\s*([0-9]+(?:\.[0-9])?)/i);
+    // Progress like "-103.7%" or "104.1%"
+    const mPct = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
+
+    if (!mPrice || !mPct) return;
+
+    const price = parseFloat(mPrice[1]);
+    const progress = parseFloat(mPct[1]); // positive = rise, negative = fall
+
+    if (!isFinite(price) || !isFinite(progress)) return;
+    out.push({ name, price, progress });
+  });
+
+  return out;
+}
+
+
 // ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
 async function fetchPredictedFromLiveFPL() {
-  // 1) Try plan.livefpl JSON (server returns plain JSON with risers/fallers)
-  try {
-    const { data } = await axios.get("https://plan.livefpl.net/prices", {
-      timeout: 20000,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
-    });
-
-    // Normalize a few possible shapes:
-    const pick = (obj, keys) => keys.find(k => Array.isArray(obj?.[k])) || null;
-
-    const rKey = pick(data, ["risers", "rises", "predicted_rises", "predicted_risers"]);
-    const fKey = pick(data, ["fallers", "falls", "predicted_falls", "predicted_fallers"]);
-
-    if (rKey || fKey) {
-      const normList = (arr = []) =>
-        arr
-          .map(x => ({
-            name: x.web_name || x.name || x.player || x.player_name || "",
-            team: x.team_short || x.team || x.team_name || "",
-            // price can be decimal (5.6) or "56" (now_cost). Accept both.
-            price:
-              typeof x.now_cost === "number"
-                ? x.now_cost / 10
-                : Number(String(x.price ?? x.nowPrice ?? x.now_cost).replace(/[^\d.]/g, "")),
-          }))
-          .filter(p => p.name && Number.isFinite(p.price));
-
-      return {
-        risers: normList(data[rKey]).slice(0, 20),
-        fallers: normList(data[fKey]).slice(0, 20),
-      };
+  const url = "https://www.livefpl.net/prices";
+  const { data: html } = await axios.get(url, {
+    timeout: 20000,
+    headers: {
+      // a friendly UA helps some hosts serve full HTML to bots
+      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)"
     }
-  } catch (_) { /* try next source */ }
+  });
 
-  // 2) Try livefpl JSON candidates (these change occasionally; we try a few)
-  const candidates = [
-    "https://www.livefpl.net/api/prices",
-    "https://www.livefpl.net/prices.json",
-  ];
-  for (const url of candidates) {
-    try {
-      const { data } = await axios.get(url, {
-        timeout: 20000,
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
-      });
-      // Look for arrays anywhere in the JSON that look like players+price
-      const arrays = [];
-      (function scan(x) {
-        if (!x) return;
-        if (Array.isArray(x)) arrays.push(x);
-        else if (typeof x === "object") for (const k in x) scan(x[k]);
-      })(data);
+  const cards = parseSummaryFromLiveFPL(html);       // [{name, price, progress}]
+  if (!cards.length) return { risers: [], fallers: [] };
 
-      const toRows = arr =>
-        arr
-          .filter(o => o && typeof o === "object")
-          .map(o => ({
-            name: o.web_name || o.name || o.player || "",
-            team: o.team_short || o.team || "",
-            price:
-              typeof o.now_cost === "number"
-                ? o.now_cost / 10
-                : Number(String(o.price ?? o.nowPrice ?? o.now_cost).replace(/[^\d.]/g, "")),
-            type: (o.type || o.dir || o.status || o.label || "").toString().toLowerCase(),
-          }))
-          .filter(p => p.name && Number.isFinite(p.price));
+  // Thresholds:
+  const risersRaw = cards.filter(c => c.progress >= 100);
+  const fallersRaw = cards.filter(c => c.progress <= -100);
 
-      let risers = [];
-      let fallers = [];
-      for (const a of arrays) {
-        const rows = toRows(a);
-        if (!rows.length) continue;
-        // Bucket by any “type” hint or section label
-        const hasRiseHint = rows.some(r => /rise|riser|up/.test(r.type));
-        const hasFallHint = rows.some(r => /fall|faller|down/.test(r.type));
-        if (hasRiseHint && !risers.length) risers = rows;
-        if (hasFallHint && !fallers.length) fallers = rows;
-      }
-      if (risers.length || fallers.length) {
-        return { risers: risers.slice(0, 20), fallers: fallers.slice(0, 20) };
-      }
-    } catch (_) { /* keep trying */ }
-  }
+  // Enrich with team via FPL bootstrap
+  const teamMap = await fetchFplTeamMap();
+  const attachTeam = (arr) => arr.map(p => ({
+    name: p.name,
+    team: teamMap[normalizePlayerKey(p.name)] || "",
+    price: p.price
+  })).slice(0, 25);
 
-  // 3) Fallback: static HTML attempt (works if they pre-render lists)
-  try {
-    const { data: html } = await axios.get("https://www.livefpl.net/prices", {
-      timeout: 20000,
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
-    });
-    const $ = cheerio.load(html);
-
-    // Heuristic: look for any table or list under headings containing "Rise"/"Fall"
-    function parseBlock($root) {
-      const out = [];
-      $root.find("tr").each((i, tr) => {
-        if (i === 0) return;
-        const tds = $(tr).find("td");
-        if (tds.length < 2) return;
-        const name = $(tds[0]).text().trim();
-        const team = $(tds[1]).text().trim();
-        const priceRaw = $(tds[2])?.text()?.trim() ?? "";
-        const price = Number(priceRaw.replace(/[^\d.]/g, ""));
-        if (name && Number.isFinite(price)) out.push({ name, team, price });
-      });
-      if (out.length) return out;
-
-      // try list items
-      $root.find("li").each((_, li) => {
-        const t = $(li).text().trim();
-        // e.g. "Tino Livramento (NEW) – 4.6"
-        const m = t.match(/^(.+?)\s*\(([^)]+)\).*?(\d+(?:\.\d+)?)/);
-        if (m) out.push({ name: m[1].trim(), team: m[2].trim(), price: Number(m[3]) });
-      });
-      return out;
-    }
-
-    let risers = [], fallers = [];
-
-    $("h1,h2,h3,h4").each((_, h) => {
-      const txt = $(h).text().toLowerCase();
-      const block = $(h).next();
-      if (/rise/.test(txt)) risers = parseBlock(block) || risers;
-      if (/fall/.test(txt)) fallers = parseBlock(block) || fallers;
-    });
-
-    return { risers: risers.slice(0, 20), fallers: fallers.slice(0, 20) };
-  } catch (_) {
-    // swallow
-  }
-
-  // Nothing found
-  return { risers: [], fallers: [] };
+  return {
+    risers: attachTeam(risersRaw),
+    fallers: attachTeam(fallersRaw),
+  };
 }
 
 
 function buildPredictedMessage(pred) {
   const lines = [];
-  lines.push("**POTENTIAL PRICE CHANGES - PREDICTIONS:**");
+  lines.push("**POTENTIAL PRICE CHANGES:**");
   lines.push("");
 
   lines.push("**Predicted Risers:**");
@@ -1262,13 +1243,19 @@ async function postPredictedIfChanged(channel) {
 
 // ---------- CONFIRMED (plan.livefpl.net/price_changes) ----------
 async function fetchConfirmedPriceChanges() {
-  const url = "https://plan.livefpl.net/price_changes"; 
-  const { data, headers } = await axios.get(url, { timeout: 20000 });
+  const url = "https://plan.livefpl.net/price_changes";
+  const { data, headers } = await axios.get(url, {
+    timeout: 20000,
+    headers: {
+      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
+      "Accept": "text/html,application/json;q=0.9"
+    }
+  });
 
-  // Try JSON first
-  if ((headers["content-type"] || "").includes("application/json") || typeof data === "object") {
-    const obj = data || {};
-    // Expect something like { rises:[{name,team,old,new}], falls:[...] }
+  // 1) JSON (or JSON-as-string) fast-path
+  const ctype = (headers["content-type"] || "").toLowerCase();
+  if (ctype.includes("application/json") || typeof data === "object") {
+    const obj = typeof data === "string" ? JSON.parse(data) : (data || {});
     const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => ({
       name: x.name || x.player || x.web_name || "",
       team: x.team || x.team_short || x.team_name || "",
@@ -1277,26 +1264,36 @@ async function fetchConfirmedPriceChanges() {
     })).filter(x => x.name && isFinite(x.old) && isFinite(x.next));
     return { risers: norm(obj.rises || obj.risers), fallers: norm(obj.falls || obj.fallers) };
   }
+  if (typeof data === "string" && data.trim().startsWith("{")) {
+    try {
+      const obj = JSON.parse(data.trim());
+      const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => ({
+        name: x.name || x.player || x.web_name || "",
+        team: x.team || x.team_short || x.team_name || "",
+        old: Number(String(x.old || x.old_price || x.prev_price || x.price_before).replace(/[^\d.]/g, "")),
+        next: Number(String(x.new || x.new_price || x.price_after || x.price).replace(/[^\d.]/g, "")),
+      })).filter(x => x.name && isFinite(x.old) && isFinite(x.next));
+      return { risers: norm(obj.rises || obj.risers), fallers: norm(obj.falls || obj.fallers) };
+    } catch (_) { /* fall through to HTML */ }
+  }
 
-  // Fallback: HTML tables
+  // 2) HTML fallback
   const $ = cheerio.load(data);
-  const blocks = [];
-  $("table").each((_, el) => {
-    const table = $(el);
-    const hdrTxt = table.prevAll("h1,h2,h3,h4").first().text().toLowerCase();
-    blocks.push({ hdrTxt, table });
-  });
 
-  function parseTable(table) {
+  function parseTable($table) {
     const out = [];
-    table.find("tr").each((i, tr) => {
-      if (i === 0) return; // header
+    const rows = $table.find("tr");
+    rows.each((i, tr) => {
       const tds = $(tr).find("td");
-      if (tds.length < 3) return;
-      const nameTeam = $(tds[0]).text().trim(); // e.g. "Erling Haaland (MCI)"
+      if (tds.length < 3) return; // need name, old, new
+      // skip header rows that use <td> not <th>
+      const maybeHeader = $(tds[1]).text().toLowerCase().includes("old");
+      if (i === 0 || maybeHeader) return;
+
+      const nameTeam = $(tds[0]).text().trim(); // "Erling Haaland (MCI)"
       const m = nameTeam.match(/^(.+?)\s*\(([^)]+)\)/);
-      const name = m ? m[1].trim() : nameTeam;
-      const team = m ? m[2].trim() : "";
+      const name = (m ? m[1] : nameTeam).trim();
+      const team = (m ? m[2] : "").trim();
       const oldP = Number($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
       const newP = Number($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
       if (name && isFinite(oldP) && isFinite(newP)) out.push({ name, team, old: oldP, next: newP });
@@ -1304,14 +1301,31 @@ async function fetchConfirmedPriceChanges() {
     return out;
   }
 
+  // Find rises/falls tables by nearby headings
   let risers = [];
   let fallers = [];
-  for (const b of blocks) {
-    if (b.hdrTxt.includes("rise")) risers = parseTable(b.table);
-    if (b.hdrTxt.includes("fall")) fallers = parseTable(b.table);
+
+  $("h1,h2,h3,h4").each((_, el) => {
+    const txt = $(el).text().toLowerCase();
+    if (/(price\s*)?rises?|risers/.test(txt)) {
+      const table = $(el).nextAll("table").first();
+      if (table.length) risers = parseTable(table);
+    } else if (/(price\s*)?falls?|fallers/.test(txt)) {
+      const table = $(el).nextAll("table").first();
+      if (table.length) fallers = parseTable(table);
+    }
+  });
+
+  // If headings changed, fall back to first two tables on the page
+  if (!risers.length || !fallers.length) {
+    const tabs = $("table").toArray().map(el => $(el));
+    if (!risers.length && tabs[0]) risers = parseTable(tabs[0]);
+    if (!fallers.length && tabs[1]) fallers = parseTable(tabs[1]);
   }
+
   return { risers, fallers };
 }
+
 
 function buildConfirmedMessage(chg) {
   const lines = [];

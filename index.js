@@ -760,7 +760,7 @@ async function summarizePreviousGW(league, prevGw) {
 
 function formatPrevGwSummaryMessage(league, prevGw, summary) {
   const lines = [];
-  lines.push(`📊 GW ${prevGw} SUMMARY: ${league[0].toUpperCase() + league.slice(1)}`);
+  lines.push(`📊 **GW ${prevGw} SUMMARY: ${league[0].toUpperCase() + league.slice(1)}**`);
 
   // If we don't have any chosen matchups, still show hi/lo if available.
   if (!summary || !summary.chosen || !summary.chosen.length) {
@@ -787,6 +787,7 @@ function formatPrevGwSummaryMessage(league, prevGw, summary) {
     lines.push(`Matchup ${i}:`);
     lines.push(`${a}  vs  ${b}`);
     lines.push(`Winner: **${winner}**`);
+    lines.push("");
     lines.push("");
     i++;
   }

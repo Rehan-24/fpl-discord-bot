@@ -1074,134 +1074,143 @@ function fmtPrice(n) {
   return `£${p.toFixed(1)}m`;
 }
 
-// ---------- PREDICTED (livefpl.net/prices) ----------
+// ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
 async function fetchPredictedFromLiveFPL() {
-  // Strategy:
-  // 1) Try to grab Next.js bootstrap JSON (__NEXT_DATA__) and look for risers/fallers arrays.
-  // 2) Fallback: parse any visible table content for "Risers" / "Fallers".
-  const url = "https://www.livefpl.net/prices";
-  const { data: html } = await axios.get(url, { timeout: 20000 });
-  const $ = cheerio.load(html);
+  // 1) Try plan.livefpl JSON (server returns plain JSON with risers/fallers)
+  try {
+    const { data } = await axios.get("https://plan.livefpl.net/prices", {
+      timeout: 20000,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
+    });
 
-  // Try Next.js data first
-  const nextDataTxt = $("#__NEXT_DATA__").first().text().trim();
-  if (nextDataTxt) {
+    // Normalize a few possible shapes:
+    const pick = (obj, keys) => keys.find(k => Array.isArray(obj?.[k])) || null;
+
+    const rKey = pick(data, ["risers", "rises", "predicted_rises", "predicted_risers"]);
+    const fKey = pick(data, ["fallers", "falls", "predicted_falls", "predicted_fallers"]);
+
+    if (rKey || fKey) {
+      const normList = (arr = []) =>
+        arr
+          .map(x => ({
+            name: x.web_name || x.name || x.player || x.player_name || "",
+            team: x.team_short || x.team || x.team_name || "",
+            // price can be decimal (5.6) or "56" (now_cost). Accept both.
+            price:
+              typeof x.now_cost === "number"
+                ? x.now_cost / 10
+                : Number(String(x.price ?? x.nowPrice ?? x.now_cost).replace(/[^\d.]/g, "")),
+          }))
+          .filter(p => p.name && Number.isFinite(p.price));
+
+      return {
+        risers: normList(data[rKey]).slice(0, 20),
+        fallers: normList(data[fKey]).slice(0, 20),
+      };
+    }
+  } catch (_) { /* try next source */ }
+
+  // 2) Try livefpl JSON candidates (these change occasionally; we try a few)
+  const candidates = [
+    "https://www.livefpl.net/api/prices",
+    "https://www.livefpl.net/prices.json",
+  ];
+  for (const url of candidates) {
     try {
-      const next = JSON.parse(nextDataTxt);
-
-      // Heuristics to find arrays with a 'name' and 'team' and 'now_cost' (or 'price'),
-      // and a flag indicating 'riser'/'faller' / 'type'.
-      const candidates = [];
+      const { data } = await axios.get(url, {
+        timeout: 20000,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
+      });
+      // Look for arrays anywhere in the JSON that look like players+price
+      const arrays = [];
       (function scan(x) {
         if (!x) return;
-        if (Array.isArray(x)) candidates.push(x);
-        if (typeof x === "object") {
-          for (const k in x) scan(x[k]);
-        }
-      })(next);
+        if (Array.isArray(x)) arrays.push(x);
+        else if (typeof x === "object") for (const k in x) scan(x[k]);
+      })(data);
 
-      const rows = (arr) => arr.map(o => ({
-        name: o.web_name || o.name || o.player_name || o.full_name || o.player || "",
-        team: o.team_short || o.team || o.team_name || "",
-        price: (o.now_cost ?? o.price ?? o.cost ?? o.nowCost ?? o.nowcost ?? null),
-        // many feeds use a boolean/type/dir/label to mark risers vs fallers:
-        type: (o.type || o.dir || o.label || o.status || "").toString().toLowerCase(),
-        // some feeds separate arrays (risers/fallers) – we'll ignore this field if we already know the array bucket
-      }));
+      const toRows = arr =>
+        arr
+          .filter(o => o && typeof o === "object")
+          .map(o => ({
+            name: o.web_name || o.name || o.player || "",
+            team: o.team_short || o.team || "",
+            price:
+              typeof o.now_cost === "number"
+                ? o.now_cost / 10
+                : Number(String(o.price ?? o.nowPrice ?? o.now_cost).replace(/[^\d.]/g, "")),
+            type: (o.type || o.dir || o.status || o.label || "").toString().toLowerCase(),
+          }))
+          .filter(p => p.name && Number.isFinite(p.price));
 
       let risers = [];
       let fallers = [];
-
-      for (const arr of candidates) {
-        if (!Array.isArray(arr) || !arr.length || typeof arr[0] !== "object") continue;
-        const m = rows(arr);
-
-        // If this array has a consistent 'type' value, infer bucket
-        const types = new Set(m.map(x => x.type));
-        const hasPriceLike = m.some(x => x.price != null);
-        const hasName = m.some(x => x.name);
-
-        if (hasPriceLike && hasName) {
-          const lbl = (arr.label || arr.title || "").toString().toLowerCase();
-
-          if (types.has("riser") || types.has("rise") || lbl.includes("rise")) {
-            risers = risers.length ? risers : m;
-          } else if (types.has("faller") || types.has("fall") || lbl.includes("fall")) {
-            fallers = fallers.length ? fallers : m;
-          } else if (lbl.includes("riser")) {
-            risers = risers.length ? risers : m;
-          } else if (lbl.includes("faller")) {
-            fallers = fallers.length ? fallers : m;
-          }
-        }
+      for (const a of arrays) {
+        const rows = toRows(a);
+        if (!rows.length) continue;
+        // Bucket by any “type” hint or section label
+        const hasRiseHint = rows.some(r => /rise|riser|up/.test(r.type));
+        const hasFallHint = rows.some(r => /fall|faller|down/.test(r.type));
+        if (hasRiseHint && !risers.length) risers = rows;
+        if (hasFallHint && !fallers.length) fallers = rows;
       }
-
-      // If we didn't bucket by metadata, try a "best looking two arrays" fallback:
-      if (!risers.length || !fallers.length) {
-        // find two distinct arrays with plausible price+name fields
-        const plausible = candidates
-          .filter(a => Array.isArray(a) && a.length && typeof a[0] === "object")
-          .map(rows)
-          .filter(m => m.some(x => x.name) && m.some(x => x.price != null));
-
-        if (plausible.length >= 2 && (!risers.length || !fallers.length)) {
-          // Guess first is risers, second is fallers (good enough fallback)
-          risers = risers.length ? risers : plausible[0];
-          fallers = fallers.length ? fallers : plausible[1];
-        }
-      }
-
-      // Normalize subset (cap to 20 of each so we don't flood)
-      const clean = (arr) => arr
-        .filter(x => x.name && x.price != null)
-        .map(x => ({
-          name: x.name,
-          team: x.team || "",
-          price: (typeof x.price === "number" ? x.price : Number(x.price)),
-        }))
-        .slice(0, 20);
-
       if (risers.length || fallers.length) {
-        return { risers: clean(risers), fallers: clean(fallers) };
+        return { risers: risers.slice(0, 20), fallers: fallers.slice(0, 20) };
       }
-    } catch (_) { /* fall through to HTML table parse */ }
+    } catch (_) { /* keep trying */ }
   }
 
-  // Fallback: look for tables with headings 'Risers'/'Fallers'
-  const text = $.root().text().toLowerCase();
-  const blocks = [];
-  $("table").each((_, el) => {
-    const table = $(el);
-    const hdrTxt = table.prevAll("h1,h2,h3,h4").first().text().toLowerCase();
-    blocks.push({ hdrTxt, table });
-  });
-
-  function parseTable(table) {
-    const out = [];
-    table.find("tr").each((i, tr) => {
-      if (i === 0) return; // skip header
-      const tds = $(tr).find("td");
-      if (!tds.length) return;
-      const name = $(tds[0]).text().trim();
-      const team = $(tds[1])?.text()?.trim() || "";
-      const priceRaw = $(tds[2])?.text()?.trim() || ""; // e.g. 5.6
-      const price = Number(priceRaw.replace(/[^\d.]/g, ""));
-      if (name && isFinite(price)) out.push({ name, team, price });
+  // 3) Fallback: static HTML attempt (works if they pre-render lists)
+  try {
+    const { data: html } = await axios.get("https://www.livefpl.net/prices", {
+      timeout: 20000,
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; tfpl-bot/1.0)" },
     });
-    return out.slice(0, 20);
-  }
+    const $ = cheerio.load(html);
 
-  let risers = [];
-  let fallers = [];
-  for (const b of blocks) {
-    if (b.hdrTxt.includes("rise")) risers = parseTable(b.table);
-    if (b.hdrTxt.includes("fall")) fallers = parseTable(b.table);
+    // Heuristic: look for any table or list under headings containing "Rise"/"Fall"
+    function parseBlock($root) {
+      const out = [];
+      $root.find("tr").each((i, tr) => {
+        if (i === 0) return;
+        const tds = $(tr).find("td");
+        if (tds.length < 2) return;
+        const name = $(tds[0]).text().trim();
+        const team = $(tds[1]).text().trim();
+        const priceRaw = $(tds[2])?.text()?.trim() ?? "";
+        const price = Number(priceRaw.replace(/[^\d.]/g, ""));
+        if (name && Number.isFinite(price)) out.push({ name, team, price });
+      });
+      if (out.length) return out;
+
+      // try list items
+      $root.find("li").each((_, li) => {
+        const t = $(li).text().trim();
+        // e.g. "Tino Livramento (NEW) – 4.6"
+        const m = t.match(/^(.+?)\s*\(([^)]+)\).*?(\d+(?:\.\d+)?)/);
+        if (m) out.push({ name: m[1].trim(), team: m[2].trim(), price: Number(m[3]) });
+      });
+      return out;
+    }
+
+    let risers = [], fallers = [];
+
+    $("h1,h2,h3,h4").each((_, h) => {
+      const txt = $(h).text().toLowerCase();
+      const block = $(h).next();
+      if (/rise/.test(txt)) risers = parseBlock(block) || risers;
+      if (/fall/.test(txt)) fallers = parseBlock(block) || fallers;
+    });
+
+    return { risers: risers.slice(0, 20), fallers: fallers.slice(0, 20) };
+  } catch (_) {
+    // swallow
   }
-  if (risers.length || fallers.length) return { risers, fallers };
 
   // Nothing found
   return { risers: [], fallers: [] };
 }
+
 
 function buildPredictedMessage(pred) {
   const lines = [];

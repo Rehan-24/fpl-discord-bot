@@ -16,6 +16,14 @@ const FPL_MUNDO_PLACEHOLDER_IMAGE =
 // Tag for this season’s weekly reviews
 const FPL_MUNDO_TAG = "GW-Review-2025/26";
 
+// ===== Weekly Reviews article config =====
+const WEEKLY_REVIEW_IMAGE =
+  process.env.WEEKLY_REVIEW_IMAGE ||
+  "https://news.bbcimg.co.uk/media/images/53844000/jpg/_53844767_012374172-1.jpg";
+const WEEKLY_REVIEW_TAG =
+  process.env.WEEKLY_REVIEW_TAG || "GW-Review-2025/26";
+
+
 // ===== CONFIG =====
 const BASE = "https://tfpl.onrender.com/api".replace(/\/+$/, "");
 if (!BASE) throw new Error("BACKEND_URL not set");
@@ -331,7 +339,6 @@ async function postWeeklyFplMundoArticles() {
       image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
       content_markdown: champ.markdown,
       tags: [FPL_MUNDO_TAG],
-      author: "FPL Mundo Auto",
     }).catch(e => console.log("postNews (champ) failed:", e?.message || e));
   }
 
@@ -813,7 +820,7 @@ async function maybePostPrevGwSummaries() {
 
   const events = bs?.events || [];
 
-  // Choose the latest *finished* GW (cover both field names)
+  // latest finished GW
   const finished = events
     .filter(e => e.is_finished === true || e.finished === true)
     .sort((a, b) => b.id - a.id);
@@ -830,17 +837,48 @@ async function maybePostPrevGwSummaries() {
   if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
 
   try {
+    // 1) Build and send messages to Discord (same as before)
+    const leagueMsgs = [];
     for (const league of LEAGUES) {
       const sum = await summarizePreviousGW(league, prevGw);
       const msg = formatPrevGwSummaryMessage(league, prevGw, sum);
       await channel.send(msg);
+      leagueMsgs.push({ league, msg });
     }
+
+    // 2) Also publish a website article that aggregates both leagues
+    // Title: "GW# Reviews"
+    const title = `GW${prevGw} Reviews`;
+    const excerpt =
+      "Review the biggest matchups and see who scored the most (and least) this week!";
+
+    // Make a clean, nicely-formatted Markdown body from the Discord messages.
+    // We keep the content but give each league a Markdown heading.
+    const content_markdown = leagueMsgs
+      .map(({ league, msg }) => {
+        const header = `## ${league[0].toUpperCase() + league.slice(1)}`;
+        // Drop the leading " GWx SUMMARY: ..." line if present to avoid duplicate headings.
+        const cleaned = msg.replace(/^📊\s*GW\s*\d+\s*SUMMARY:\s*[^\n]+\n?/i, "").trim();
+        return `${header}\n\n${cleaned}`;
+      })
+      .join("\n\n---\n\n");
+
+    // Tag the article so it’s easy to find
+    await postNews({
+      title,
+      excerpt,
+      image_url: WEEKLY_REVIEW_IMAGE,
+      content_markdown,
+      tags: [WEEKLY_REVIEW_TAG],
+    }).catch(e => console.log("postNews (weekly reviews) failed:", e?.message || e));
+
     __LAST_SUMMARY_POSTED_GW = prevGw;
-    console.log(`Posted previous GW summaries for GW${prevGw}.`);
+    console.log(`Posted previous GW summaries for GW${prevGw} and published site article.`);
   } catch (e) {
     console.log("maybePostPrevGwSummaries: posting failed", e?.message || e);
   }
 }
+
 
 
 

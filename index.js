@@ -4,6 +4,18 @@ const {
 } = require("discord.js");
 const axios = require("axios");
 
+// ===== FPL Mundo scraping config =====
+const FPL_MUNDO_PREMIER_URL =
+  process.env.FPL_MUNDO_PREMIER_URL || "https://www.fplmundo.com/723566";
+const FPL_MUNDO_CHAMP_URL =
+  process.env.FPL_MUNDO_CHAMP_URL || "https://www.fplmundo.com/850022";
+const FPL_MUNDO_PLACEHOLDER_IMAGE =
+  process.env.FPL_MUNDO_PLACEHOLDER_IMAGE ||
+  "https://fplvideotemplates.com/shop-all/templates/images/Gameweek-Review-Analysis-PPT-230802-1360x765-02.jpg";
+
+// Tag for this season’s weekly reviews
+const FPL_MUNDO_TAG = "GW-Review-2025/26";
+
 // ===== CONFIG =====
 const BASE = "https://tfpl.onrender.com/api".replace(/\/+$/, "");
 if (!BASE) throw new Error("BACKEND_URL not set");
@@ -189,6 +201,149 @@ async function refreshManagerDiscordMap() {
     console.log("Failed to refresh manager map:", e?.response?.status || "", e?.message || e);
   }
 }
+
+// ===== FPL Mundo helpers =====
+
+// Latest finished GW (prefers most recent finished event)
+async function getLatestFinishedGwNumber() {
+  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+  const events = data?.events || [];
+  const finished = events
+    .filter(e => e.is_finished === true || e.finished === true)
+    .sort((a, b) => b.id - a.id);
+  return finished[0]?.id ?? null;
+}
+
+// Very light HTML -> Markdown-ish text (keeps paragraphs/line breaks)
+function htmlToText(html) {
+  if (!html) return "";
+  // remove scripts/styles
+  let s = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+              .replace(/<style[\s\S]*?<\/style>/gi, "");
+
+  // prefer <article>, else <main>, else whole doc
+  const art = s.match(/<article[\s\S]*?<\/article>/i)?.[0]
+           || s.match(/<main[\s\S]*?<\/main>/i)?.[0]
+           || s;
+
+  // normalize line breaks
+  s = art.replace(/<\s*br\s*\/?>/gi, "\n")
+         .replace(/<\/p>/gi, "\n\n");
+
+  // strip tags
+  s = s.replace(/<[^>]+>/g, "");
+
+  // condense whitespace
+  s = s.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+
+  return s;
+}
+
+function extractTitleFromHtml(html) {
+  if (!html) return "Review";
+  const og = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+  if (og && og[1]) return og[1].trim();
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+  if (h1 && h1[1]) return h1[1].replace(/<[^>]+>/g, "").trim();
+  const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (t && t[1]) return t[1].trim();
+  return "Review";
+}
+
+async function fetchFplMundoArticle(url) {
+  const { data: html } = await axios.get(url, { timeout: 20000 });
+  const title = extractTitleFromHtml(html);
+  const body = htmlToText(html);
+  // Excerpt == body per your instruction
+  const excerpt = body;
+  // Add source link at the end
+  const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
+  return { title, excerpt, markdown };
+}
+
+// Compute ms until next weekly time in a TZ (Tue=2) using the “offset trick”
+function msUntilNextWeekly(weekday /*0-6*/, hour, minute, tz) {
+  const now = new Date();
+  const tzNow = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+  const offset = tzNow.getTime() - now.getTime(); // tz offset vs server clock
+
+  const target = new Date(tzNow);
+  const day = target.getDay();
+  let addDays = (weekday - day + 7) % 7;
+  // if it's today but time already passed, push a week
+  const alreadyPassed =
+    addDays === 0 &&
+    (target.getHours() > hour ||
+      (target.getHours() === hour && target.getMinutes() >= minute));
+  if (alreadyPassed) addDays = 7;
+
+  target.setDate(target.getDate() + addDays);
+  target.setHours(hour, minute, 0, 0);
+
+  const realTarget = new Date(target.getTime() - offset);
+  return Math.max(0, realTarget.getTime() - now.getTime());
+}
+
+function scheduleWeeklyInTz(label, weekday, hour, minute, tz, fn) {
+  const scheduleNext = () => {
+    const ms = msUntilNextWeekly(weekday, hour, minute, tz);
+    console.log(`[${label}] next run in ${Math.round(ms / 1000 / 60)} min`);
+    setTimeout(async () => {
+      try {
+        await fn();
+      } catch (e) {
+        console.log(`[${label}] job error:`, e?.message || e);
+      } finally {
+        // recompute to handle DST changes
+        scheduleNext();
+      }
+    }, ms);
+  };
+  scheduleNext();
+}
+
+// Post both Premier & Championship weekly FPL Mundo articles
+async function postWeeklyFplMundoArticles() {
+  const gw = await getLatestFinishedGwNumber();
+
+  const [prem, champ] = await Promise.all([
+    fetchFplMundoArticle(FPL_MUNDO_PREMIER_URL).catch(() => null),
+    fetchFplMundoArticle(FPL_MUNDO_CHAMP_URL).catch(() => null),
+  ]);
+
+  // Title shape: "GW# Review: <FPL Mundo Title> (Premier/Championship)"
+  if (prem) {
+    const title = `GW${gw ?? "?"} Review: ${prem.title} (Premier)`;
+    await postNews({
+      title,
+      excerpt: prem.excerpt,
+      image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
+      content_markdown: prem.markdown,
+      tags: [FPL_MUNDO_TAG],
+    }).catch(e => console.log("postNews (prem) failed:", e?.message || e));
+  }
+
+  if (champ) {
+    const title = `GW${gw ?? "?"} Review: ${champ.title} (Championship)`;
+    await postNews({
+      title,
+      excerpt: champ.excerpt,
+      image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
+      content_markdown: champ.markdown,
+      tags: [FPL_MUNDO_TAG],
+      author: "FPL Mundo Auto",
+    }).catch(e => console.log("postNews (champ) failed:", e?.message || e));
+  }
+
+  console.log("FPL Mundo weekly posts completed.");
+}
+
+// Public function to kick off our weekly schedule (Tue 7:00 AM PT)
+function scheduleWeeklyFplMundoPosts() {
+  // Tuesday = 2
+  scheduleWeeklyInTz("FPL Mundo Weekly", 2, 7, 0, "America/Los_Angeles", postWeeklyFplMundoArticles);
+}
+
 
 
 // ===== Rivalries support =====
@@ -774,6 +929,8 @@ client.once(Events.ClientReady, async (c) => {
   try { await refreshManagerDiscordMap(); } catch (_) {}
   try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
+  try { scheduleWeeklyFplMundoPosts(); } catch (e) { console.log("FPL Mundo schedule error:", e?.message || e); }
+
   console.log(`Logged in as ${c.user.tag}`);
   await registerCommandsOnReady();
 });

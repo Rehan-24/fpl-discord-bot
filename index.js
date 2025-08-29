@@ -1066,12 +1066,26 @@ let __LAST_CONF_SIG = "";
 const UP = "📈";
 const DOWN = "📉";
 
-// £x.xm formatting from FPL "now_cost"/10 style
-function fmtPrice(n) {
-  // Accept numbers like 56 => 5.6 ; 5.6 => 5.6
-  const num = typeof n === "number" && n > 10 ? n / 10 : Number(n);
-  const p = isFinite(num) ? num : 0;
-  return `£${p.toFixed(1)}m`;
+// Replace your old fmtPrice with these helpers
+function toPriceFloat(x) {
+  if (x == null) return NaN;
+  const n = typeof x === "number" ? x : Number(String(x).replace(/[^\d.]/g, ""));
+  if (!Number.isFinite(n)) return NaN;
+  // Only treat as FPL now_cost (e.g. 105) when it's an INTEGER >= 20
+  return Number.isInteger(n) && n >= 20 ? n / 10 : n;
+}
+
+function addDelta(x, delta) {
+  const p = toPriceFloat(x);
+  if (!Number.isFinite(p)) return NaN;
+  // keep one decimal accuracy
+  return Math.round((p + delta) * 10) / 10;
+}
+
+function fmtPrice(x) {
+  const p = toPriceFloat(x);
+  const v = Number.isFinite(p) ? p : 0;
+  return `£${v.toFixed(1)}m`;
 }
 
 // --- helpers (put near your other top-level helpers) ---
@@ -1202,7 +1216,7 @@ function buildPredictedMessage(pred) {
   if (pred.risers.length) {
     pred.risers.forEach(p => {
       const cur = fmtPrice(p.price);
-      const next = fmtPrice((typeof p.price === "number" ? p.price : Number(p.price)) + 0.1);
+      const next = fmtPrice(addDelta(p.price, +0.1));
       lines.push(`${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
     });
   } else {
@@ -1214,7 +1228,7 @@ function buildPredictedMessage(pred) {
   if (pred.fallers.length) {
     pred.fallers.forEach(p => {
       const cur = fmtPrice(p.price);
-      const next = fmtPrice((typeof p.price === "number" ? p.price : Number(p.price)) - 0.1);
+      const next = fmtPrice(addDelta(p.price, -0.1));
       lines.push(`${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
     });
   } else {
@@ -1224,14 +1238,23 @@ function buildPredictedMessage(pred) {
   return lines.join("\n");
 }
 
+function canonKey(p) {
+  const name = String(p.name || "").trim().toLowerCase();
+  const team = String(p.team || "").trim().toLowerCase();
+  const price = Number(p.price);
+  const priceStr = Number.isFinite(price) ? price.toFixed(1) : "";
+  return `${name}|${team}|${priceStr}`;
+}
+
 async function postPredictedIfChanged(channel) {
   try {
     const pred = await fetchPredictedFromLiveFPL();
-    const sig = JSON.stringify({
-      r: pred.risers.map(x => `${x.name}|${x.team}|${x.price}`).slice(0, 30),
-      f: pred.fallers.map(x => `${x.name}|${x.team}|${x.price}`).slice(0, 30),
-    });
-    if (!sig || sig === __LAST_PRED_SIG) return;
+
+    const rSet = [...new Set(pred.risers.slice(0, 30).map(canonKey))].sort();
+    const fSet = [...new Set(pred.fallers.slice(0, 30).map(canonKey))].sort();
+
+    const sig = `r=${rSet.join(",")}&f=${fSet.join(",")}`;
+    if (!sig || sig === __LAST_PRED_SIG) return;   // <- same names/prices, any order → skip
     __LAST_PRED_SIG = sig;
 
     const msg = buildPredictedMessage(pred);

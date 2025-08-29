@@ -3,6 +3,8 @@ const {
   Client, GatewayIntentBits, EmbedBuilder, Events, Routes, REST
 } = require("discord.js");
 const axios = require("axios");
+const cheerio = require("cheerio");
+
 
 // ===== FPL Mundo scraping config =====
 const FPL_MUNDO_PREMIER_URL =
@@ -908,10 +910,6 @@ async function maybePostPrevGwSummaries() {
   }
 }
 
-
-
-
-
 async function scheduleDeadlineReminders() {
   if (!REMINDER_CHANNEL_ID) {
     console.log("DEADLINE_CHANNEL_ID not set — skipping deadline reminders.");
@@ -989,6 +987,369 @@ async function scheduleDeadlineReminders() {
   console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
 }
 
+// ===== Price Change Watchers (LiveFPL predicted + confirmed) =====
+
+// ===== Price change scheduling (predicted every 2h, confirmed daily at 01:30 UTC) =====
+const PRICE_CHANNEL_ID = process.env.PRICE_CHANNEL_ID || process.env.DEADLINE_CHANNEL_ID;
+
+// Defaults: predictions every 120 min; confirmed at 01:30 UTC (GMT)
+const PREDICTED_PRICE_POLL_MIN = parseInt(process.env.PREDICTED_PRICE_POLL_MIN || "120", 10);
+const CONFIRMED_PRICE_POST_UTC = process.env.CONFIRMED_PRICE_POST_UTC || "01:30"; // "HH:MM" 24h UTC
+
+function msUntilNextUtc(hhmm) {
+  const [h, m] = (hhmm || "01:30").split(":").map(Number);
+  const now = new Date();
+  const next = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), h, m, 0, 0
+  ));
+  if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
+// Poll predictions every N minutes, but only post when the set changes
+function schedulePredictedEvery(channel, minutes = 120) {
+  const run = async () => {
+    try {
+      // This helper should fetch https://www.livefpl.net/prices and ONLY post if changed
+      await postPredictedIfChanged(channel);
+    } catch (e) {
+      console.log("predicted poll error:", e?.message || e);
+    }
+  };
+  // Optional: run once on boot 
+  run();
+  setInterval(run, Math.max(1, minutes) * 60 * 1000);
+}
+
+// Post confirmed changes exactly once each day at the given UTC time
+function scheduleConfirmedDaily(channel, hhmm = "01:30") {
+  const runOnce = async () => {
+    try {
+      // This helper should fetch https://plan.livefpl.net/price_changes
+      // and post the *daily* snapshot (you can still dedupe by date if you want)
+      await postConfirmedIfChanged(channel, { forcePostAtDailyTime: true });
+    } catch (e) {
+      console.log("confirmed daily error:", e?.message || e);
+    } finally {
+      // Schedule the next day after it runs
+      setTimeout(runOnce, 24 * 60 * 60 * 1000);
+    }
+  };
+  setTimeout(runOnce, msUntilNextUtc(hhmm));
+}
+
+async function schedulePriceWatchers(client) {
+  if (!PRICE_CHANNEL_ID) {
+    console.log("PRICE_CHANNEL_ID not set — skipping price watchers.");
+    return;
+  }
+  let channel;
+  try {
+    channel = await client.channels.fetch(PRICE_CHANNEL_ID);
+  } catch (e) {
+    console.log("Cannot fetch price channel:", e?.message || e);
+    return;
+  }
+
+  // Predictions: every 2 hours by default
+  schedulePredictedEvery(channel, PREDICTED_PRICE_POLL_MIN); // default 120
+
+  // Confirmed: once per day at 01:30 UTC
+  scheduleConfirmedDaily(channel, CONFIRMED_PRICE_POST_UTC); // default "01:30"
+}
+
+// Cache to avoid duplicate posts
+let __LAST_PRED_SIG = "";
+let __LAST_CONF_SIG = "";
+
+// Emojis
+const UP = "📈";
+const DOWN = "📉";
+
+// £x.xm formatting from FPL "now_cost"/10 style
+function fmtPrice(n) {
+  // Accept numbers like 56 => 5.6 ; 5.6 => 5.6
+  const num = typeof n === "number" && n > 10 ? n / 10 : Number(n);
+  const p = isFinite(num) ? num : 0;
+  return `£${p.toFixed(1)}m`;
+}
+
+// ---------- PREDICTED (livefpl.net/prices) ----------
+async function fetchPredictedFromLiveFPL() {
+  // Strategy:
+  // 1) Try to grab Next.js bootstrap JSON (__NEXT_DATA__) and look for risers/fallers arrays.
+  // 2) Fallback: parse any visible table content for "Risers" / "Fallers".
+  const url = "https://www.livefpl.net/prices";
+  const { data: html } = await axios.get(url, { timeout: 20000 });
+  const $ = cheerio.load(html);
+
+  // Try Next.js data first
+  const nextDataTxt = $("#__NEXT_DATA__").first().text().trim();
+  if (nextDataTxt) {
+    try {
+      const next = JSON.parse(nextDataTxt);
+
+      // Heuristics to find arrays with a 'name' and 'team' and 'now_cost' (or 'price'),
+      // and a flag indicating 'riser'/'faller' / 'type'.
+      const candidates = [];
+      (function scan(x) {
+        if (!x) return;
+        if (Array.isArray(x)) candidates.push(x);
+        if (typeof x === "object") {
+          for (const k in x) scan(x[k]);
+        }
+      })(next);
+
+      const rows = (arr) => arr.map(o => ({
+        name: o.web_name || o.name || o.player_name || o.full_name || o.player || "",
+        team: o.team_short || o.team || o.team_name || "",
+        price: (o.now_cost ?? o.price ?? o.cost ?? o.nowCost ?? o.nowcost ?? null),
+        // many feeds use a boolean/type/dir/label to mark risers vs fallers:
+        type: (o.type || o.dir || o.label || o.status || "").toString().toLowerCase(),
+        // some feeds separate arrays (risers/fallers) – we'll ignore this field if we already know the array bucket
+      }));
+
+      let risers = [];
+      let fallers = [];
+
+      for (const arr of candidates) {
+        if (!Array.isArray(arr) || !arr.length || typeof arr[0] !== "object") continue;
+        const m = rows(arr);
+
+        // If this array has a consistent 'type' value, infer bucket
+        const types = new Set(m.map(x => x.type));
+        const hasPriceLike = m.some(x => x.price != null);
+        const hasName = m.some(x => x.name);
+
+        if (hasPriceLike && hasName) {
+          const lbl = (arr.label || arr.title || "").toString().toLowerCase();
+
+          if (types.has("riser") || types.has("rise") || lbl.includes("rise")) {
+            risers = risers.length ? risers : m;
+          } else if (types.has("faller") || types.has("fall") || lbl.includes("fall")) {
+            fallers = fallers.length ? fallers : m;
+          } else if (lbl.includes("riser")) {
+            risers = risers.length ? risers : m;
+          } else if (lbl.includes("faller")) {
+            fallers = fallers.length ? fallers : m;
+          }
+        }
+      }
+
+      // If we didn't bucket by metadata, try a "best looking two arrays" fallback:
+      if (!risers.length || !fallers.length) {
+        // find two distinct arrays with plausible price+name fields
+        const plausible = candidates
+          .filter(a => Array.isArray(a) && a.length && typeof a[0] === "object")
+          .map(rows)
+          .filter(m => m.some(x => x.name) && m.some(x => x.price != null));
+
+        if (plausible.length >= 2 && (!risers.length || !fallers.length)) {
+          // Guess first is risers, second is fallers (good enough fallback)
+          risers = risers.length ? risers : plausible[0];
+          fallers = fallers.length ? fallers : plausible[1];
+        }
+      }
+
+      // Normalize subset (cap to 20 of each so we don't flood)
+      const clean = (arr) => arr
+        .filter(x => x.name && x.price != null)
+        .map(x => ({
+          name: x.name,
+          team: x.team || "",
+          price: (typeof x.price === "number" ? x.price : Number(x.price)),
+        }))
+        .slice(0, 20);
+
+      if (risers.length || fallers.length) {
+        return { risers: clean(risers), fallers: clean(fallers) };
+      }
+    } catch (_) { /* fall through to HTML table parse */ }
+  }
+
+  // Fallback: look for tables with headings 'Risers'/'Fallers'
+  const text = $.root().text().toLowerCase();
+  const blocks = [];
+  $("table").each((_, el) => {
+    const table = $(el);
+    const hdrTxt = table.prevAll("h1,h2,h3,h4").first().text().toLowerCase();
+    blocks.push({ hdrTxt, table });
+  });
+
+  function parseTable(table) {
+    const out = [];
+    table.find("tr").each((i, tr) => {
+      if (i === 0) return; // skip header
+      const tds = $(tr).find("td");
+      if (!tds.length) return;
+      const name = $(tds[0]).text().trim();
+      const team = $(tds[1])?.text()?.trim() || "";
+      const priceRaw = $(tds[2])?.text()?.trim() || ""; // e.g. 5.6
+      const price = Number(priceRaw.replace(/[^\d.]/g, ""));
+      if (name && isFinite(price)) out.push({ name, team, price });
+    });
+    return out.slice(0, 20);
+  }
+
+  let risers = [];
+  let fallers = [];
+  for (const b of blocks) {
+    if (b.hdrTxt.includes("rise")) risers = parseTable(b.table);
+    if (b.hdrTxt.includes("fall")) fallers = parseTable(b.table);
+  }
+  if (risers.length || fallers.length) return { risers, fallers };
+
+  // Nothing found
+  return { risers: [], fallers: [] };
+}
+
+function buildPredictedMessage(pred) {
+  const lines = [];
+  lines.push("**POTENTIAL PRICE CHANGES - PREDICTIONS:**");
+  lines.push("");
+
+  lines.push("**Predicted Risers:**");
+  if (pred.risers.length) {
+    pred.risers.forEach(p => {
+      const cur = fmtPrice(p.price);
+      const next = fmtPrice((typeof p.price === "number" ? p.price : Number(p.price)) + 0.1);
+      lines.push(`${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+    });
+  } else {
+    lines.push("_None currently_");
+  }
+
+  lines.push("");
+  lines.push("**Predicted Fallers:**");
+  if (pred.fallers.length) {
+    pred.fallers.forEach(p => {
+      const cur = fmtPrice(p.price);
+      const next = fmtPrice((typeof p.price === "number" ? p.price : Number(p.price)) - 0.1);
+      lines.push(`${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+    });
+  } else {
+    lines.push("_None currently_");
+  }
+
+  return lines.join("\n");
+}
+
+async function postPredictedIfChanged(channel) {
+  try {
+    const pred = await fetchPredictedFromLiveFPL();
+    const sig = JSON.stringify({
+      r: pred.risers.map(x => `${x.name}|${x.team}|${x.price}`).slice(0, 30),
+      f: pred.fallers.map(x => `${x.name}|${x.team}|${x.price}`).slice(0, 30),
+    });
+    if (!sig || sig === __LAST_PRED_SIG) return;
+    __LAST_PRED_SIG = sig;
+
+    const msg = buildPredictedMessage(pred);
+    if (msg.trim()) await channel.send(msg);
+  } catch (e) {
+    console.log("Predicted price watcher error:", e?.message || e);
+  }
+}
+
+// ---------- CONFIRMED (plan.livefpl.net/price_changes) ----------
+async function fetchConfirmedPriceChanges() {
+  const url = "https://plan.livefpl.net/price_changes"; 
+  const { data, headers } = await axios.get(url, { timeout: 20000 });
+
+  // Try JSON first
+  if ((headers["content-type"] || "").includes("application/json") || typeof data === "object") {
+    const obj = data || {};
+    // Expect something like { rises:[{name,team,old,new}], falls:[...] }
+    const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => ({
+      name: x.name || x.player || x.web_name || "",
+      team: x.team || x.team_short || x.team_name || "",
+      old: Number(String(x.old || x.old_price || x.prev_price || x.price_before).replace(/[^\d.]/g, "")),
+      next: Number(String(x.new || x.new_price || x.price_after || x.price).replace(/[^\d.]/g, "")),
+    })).filter(x => x.name && isFinite(x.old) && isFinite(x.next));
+    return { risers: norm(obj.rises || obj.risers), fallers: norm(obj.falls || obj.fallers) };
+  }
+
+  // Fallback: HTML tables
+  const $ = cheerio.load(data);
+  const blocks = [];
+  $("table").each((_, el) => {
+    const table = $(el);
+    const hdrTxt = table.prevAll("h1,h2,h3,h4").first().text().toLowerCase();
+    blocks.push({ hdrTxt, table });
+  });
+
+  function parseTable(table) {
+    const out = [];
+    table.find("tr").each((i, tr) => {
+      if (i === 0) return; // header
+      const tds = $(tr).find("td");
+      if (tds.length < 3) return;
+      const nameTeam = $(tds[0]).text().trim(); // e.g. "Erling Haaland (MCI)"
+      const m = nameTeam.match(/^(.+?)\s*\(([^)]+)\)/);
+      const name = m ? m[1].trim() : nameTeam;
+      const team = m ? m[2].trim() : "";
+      const oldP = Number($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
+      const newP = Number($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
+      if (name && isFinite(oldP) && isFinite(newP)) out.push({ name, team, old: oldP, next: newP });
+    });
+    return out;
+  }
+
+  let risers = [];
+  let fallers = [];
+  for (const b of blocks) {
+    if (b.hdrTxt.includes("rise")) risers = parseTable(b.table);
+    if (b.hdrTxt.includes("fall")) fallers = parseTable(b.table);
+  }
+  return { risers, fallers };
+}
+
+function buildConfirmedMessage(chg) {
+  const lines = [];
+  lines.push("**PRICE CHANGE:**");
+  lines.push("");
+
+  lines.push("**Risers:**");
+  if (chg.risers.length) {
+    chg.risers.forEach(p => {
+      lines.push(`**${p.name}** (${p.team}) - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
+    });
+  } else {
+    lines.push("_None_");
+  }
+
+  lines.push("");
+  lines.push("**Fallers:**");
+  if (chg.fallers.length) {
+    chg.fallers.forEach(p => {
+      lines.push(`**${p.name}** (${p.team}) - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
+    });
+  } else {
+    lines.push("_None_");
+  }
+
+  return lines.join("\n");
+}
+
+async function postConfirmedIfChanged(channel) {
+  try {
+    const chg = await fetchConfirmedPriceChanges();
+    // Create a compact signature to dedupe
+    const sig = JSON.stringify({
+      r: chg.risers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
+      f: chg.fallers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
+    });
+    if (!sig || sig === __LAST_CONF_SIG) return;
+    __LAST_CONF_SIG = sig;
+
+    const msg = buildConfirmedMessage(chg);
+    if (msg.trim()) await channel.send(msg);
+  } catch (e) {
+    console.log("Confirmed price watcher error:", e?.message || e);
+  }
+}
+
+
 client.once(Events.ClientReady, async (c) => {
   try { await maybePostPrevGwSummaries(); } catch (_) {}
   try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
@@ -997,6 +1358,8 @@ client.once(Events.ClientReady, async (c) => {
   try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   try { scheduleWeeklyFplMundoPosts(); } catch (e) { console.log("FPL Mundo schedule error:", e?.message || e); }
+  try { await schedulePriceWatchers(client); } catch (e) { console.log("Price schedule error:", e?.message || e); }
+
 
   console.log(`Logged in as ${c.user.tag}`);
   await registerCommandsOnReady();

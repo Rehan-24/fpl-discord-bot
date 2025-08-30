@@ -1051,7 +1051,7 @@ async function schedulePriceWatchers(client) {
     return;
   }
 
-  // Predictions: every 2 hours by default
+  // Predictions: every 8 hours by default
   schedulePredictedEvery(channel, PREDICTED_PRICE_POLL_MIN); // default 120
 
   // Confirmed: once per day at 01:30 UTC
@@ -1265,89 +1265,67 @@ async function postPredictedIfChanged(channel) {
 }
 
 // ---------- CONFIRMED (plan.livefpl.net/price_changes) ----------
+// Fetch confirmed price changes from LiveFPL
 async function fetchConfirmedPriceChanges() {
   const url = "https://plan.livefpl.net/price_changes";
-  const { data, headers } = await axios.get(url, {
+  const { data: html } = await axios.get(url, {
     timeout: 20000,
     headers: {
-      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
-      "Accept": "text/html,application/json;q=0.9"
+      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)"
     }
   });
 
-  // 1) JSON (or JSON-as-string) fast-path
-  const ctype = (headers["content-type"] || "").toLowerCase();
-  if (ctype.includes("application/json") || typeof data === "object") {
-    const obj = typeof data === "string" ? JSON.parse(data) : (data || {});
-    const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => ({
-      name: x.name || x.player || x.web_name || "",
-      team: x.team || x.team_short || x.team_name || "",
-      old: Number(String(x.old || x.old_price || x.prev_price || x.price_before).replace(/[^\d.]/g, "")),
-      next: Number(String(x.new || x.new_price || x.price_after || x.price).replace(/[^\d.]/g, "")),
-    })).filter(x => x.name && isFinite(x.old) && isFinite(x.next));
-    return { risers: norm(obj.rises || obj.risers), fallers: norm(obj.falls || obj.fallers) };
-  }
-  if (typeof data === "string" && data.trim().startsWith("{")) {
-    try {
-      const obj = JSON.parse(data.trim());
-      const norm = (arr) => (Array.isArray(arr) ? arr : []).map(x => ({
-        name: x.name || x.player || x.web_name || "",
-        team: x.team || x.team_short || x.team_name || "",
-        old: Number(String(x.old || x.old_price || x.prev_price || x.price_before).replace(/[^\d.]/g, "")),
-        next: Number(String(x.new || x.new_price || x.price_after || x.price).replace(/[^\d.]/g, "")),
-      })).filter(x => x.name && isFinite(x.old) && isFinite(x.next));
-      return { risers: norm(obj.rises || obj.risers), fallers: norm(obj.falls || obj.fallers) };
-    } catch (_) { /* fall through to HTML */ }
-  }
-
-  // 2) HTML fallback
-  const $ = cheerio.load(data);
-
-  function parseTable($table) {
-    const out = [];
-    const rows = $table.find("tr");
-    rows.each((i, tr) => {
-      const tds = $(tr).find("td");
-      if (tds.length < 3) return; // need name, old, new
-      // skip header rows that use <td> not <th>
-      const maybeHeader = $(tds[1]).text().toLowerCase().includes("old");
-      if (i === 0 || maybeHeader) return;
-
-      const nameTeam = $(tds[0]).text().trim(); // "Erling Haaland (MCI)"
-      const m = nameTeam.match(/^(.+?)\s*\(([^)]+)\)/);
-      const name = (m ? m[1] : nameTeam).trim();
-      const team = (m ? m[2] : "").trim();
-      const oldP = Number($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
-      const newP = Number($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
-      if (name && isFinite(oldP) && isFinite(newP)) out.push({ name, team, old: oldP, next: newP });
+  // Parse confirmed price changes from the HTML content
+  const $ = cheerio.load(html);
+  
+  // We'll extract the price change sections similarly to how we did for predicted prices
+  const parseConfirmedPriceChanges = ($) => {
+    const risers = [];
+    const fallers = [];
+    
+    // Extract risers
+    $("table").eq(0).find("tr").each((i, el) => {
+      if (i === 0) return; // Skip the header row
+      const tds = $(el).find("td");
+      if (tds.length < 3) return; // Skip rows that don't have enough columns
+      
+      const nameTeam = $(tds[0]).text().trim();
+      const teamMatch = nameTeam.match(/\(([^)]+)\)/);
+      const name = teamMatch ? nameTeam.split(' (')[0] : nameTeam;
+      const team = teamMatch ? teamMatch[1] : "";
+      const oldPrice = parseFloat($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
+      const newPrice = parseFloat($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
+      
+      if (isFinite(oldPrice) && isFinite(newPrice)) {
+        risers.push({ name, team, old: oldPrice, next: newPrice });
+      }
     });
-    return out;
-  }
 
-  // Find rises/falls tables by nearby headings
-  let risers = [];
-  let fallers = [];
+    // Extract fallers
+    $("table").eq(1).find("tr").each((i, el) => {
+      if (i === 0) return; // Skip the header row
+      const tds = $(el).find("td");
+      if (tds.length < 3) return; // Skip rows that don't have enough columns
+      
+      const nameTeam = $(tds[0]).text().trim();
+      const teamMatch = nameTeam.match(/\(([^)]+)\)/);
+      const name = teamMatch ? nameTeam.split(' (')[0] : nameTeam;
+      const team = teamMatch ? teamMatch[1] : "";
+      const oldPrice = parseFloat($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
+      const newPrice = parseFloat($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
+      
+      if (isFinite(oldPrice) && isFinite(newPrice)) {
+        fallers.push({ name, team, old: oldPrice, next: newPrice });
+      }
+    });
 
-  $("h1,h2,h3,h4").each((_, el) => {
-    const txt = $(el).text().toLowerCase();
-    if (/(price\s*)?rises?|risers/.test(txt)) {
-      const table = $(el).nextAll("table").first();
-      if (table.length) risers = parseTable(table);
-    } else if (/(price\s*)?falls?|fallers/.test(txt)) {
-      const table = $(el).nextAll("table").first();
-      if (table.length) fallers = parseTable(table);
-    }
-  });
+    return { risers, fallers };
+  };
 
-  // If headings changed, fall back to first two tables on the page
-  if (!risers.length || !fallers.length) {
-    const tabs = $("table").toArray().map(el => $(el));
-    if (!risers.length && tabs[0]) risers = parseTable(tabs[0]);
-    if (!fallers.length && tabs[1]) fallers = parseTable(tabs[1]);
-  }
-
-  return { risers, fallers };
+  const priceChanges = parseConfirmedPriceChanges($);
+  return priceChanges;
 }
+
 
 
 function buildConfirmedMessage(chg) {
@@ -1377,14 +1355,17 @@ function buildConfirmedMessage(chg) {
   return lines.join("\n");
 }
 
+
 async function postConfirmedIfChanged(channel) {
   try {
     const chg = await fetchConfirmedPriceChanges();
+    
     // Create a compact signature to dedupe
     const sig = JSON.stringify({
       r: chg.risers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
       f: chg.fallers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
     });
+
     if (!sig || sig === __LAST_CONF_SIG) return;
     __LAST_CONF_SIG = sig;
 
@@ -1394,6 +1375,7 @@ async function postConfirmedIfChanged(channel) {
     console.log("Confirmed price watcher error:", e?.message || e);
   }
 }
+
 
 
 client.once(Events.ClientReady, async (c) => {

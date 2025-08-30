@@ -1379,6 +1379,8 @@ async function postConfirmedIfChanged(channel) {
 async function generateMatchupPreview(league, gameweek) {
   // Fetch league table and fixtures
   const rows = await fetchLeagueTable(league);
+  console.log("League table data:", rows);
+
   const teams = normalizeTeams(rows);
 
   if (!teams.length) {
@@ -1386,12 +1388,16 @@ async function generateMatchupPreview(league, gameweek) {
   }
 
   const fixtures = await fetchFixtures(league, gameweek);
+  console.log("Fetched fixtures:", fixtures);
+
 
   if (!fixtures || fixtures.length === 0) {
     return null;
   }
 
   const matchups = selectDramaticMatchups(teams, { league, fixtures, gw: gameweek });
+  console.log("Selected matchups:", matchups);
+
   
   if (!matchups || matchups.length === 0) {
     return null;

@@ -1404,16 +1404,20 @@ async function generateMatchupPreview(league, gameweek) {
   }
 
   // Format the message for matchups
+  // Format the message for matchups (in the style of automated preview messages)
   let lines = [];
+  lines.push(`📊 **GW${gameweek} PREVIEW: ${league[0].toUpperCase() + league.slice(1)}** 📊`);
+
   matchups.forEach((m, idx) => {
     const [a, b] = m.pair;
     const aMent = mentionForOwner(a.owner);
     const bMent = mentionForOwner(b.owner);
-    lines.push(`Matchup ${idx + 1}:\n${a.team} (${aMent}) [${a.position}] vs ${b.team} (${bMent}) [${b.position}]`);
-    lines.push(`Reason: ${m.reason}`);
+    lines.push(`\n**Matchup ${idx + 1}:**`);
+    lines.push(`**${a.team}** (${aMent}) [${a.position}] vs **${b.team}** (${bMent}) [${b.position}]`);
+    lines.push(`${m.reason}`);
   });
 
-  return lines.join("\n\n");
+  return lines.join("\n");
 }
 
 

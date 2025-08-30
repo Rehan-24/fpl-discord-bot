@@ -134,6 +134,19 @@ const setimage = new SlashCommandBuilder()
     o.setName("user").setDescription("Target user (mods can edit anyone)")
   );
 
+const matchupPreviews = new SlashCommandBuilder()
+  .setName("matchup_previews")
+  .setDescription("See the matchup previews for this week!")
+  // REQUIRED first
+  .addStringOption(option =>
+      option.setName('league')
+        .setDescription('The league for which to generate matchups (e.g., premier, championship)')
+        .setRequired(true))
+  .addIntegerOption(option =>
+      option.setName('gameweek')
+        .setDescription('The gameweek number for which to generate matchups.')
+        .setRequired(true));
+
 /* -------------------- Final payload -------------------- */
 const commands = [
   ping,
@@ -145,6 +158,7 @@ const commands = [
   publishNews,
   newsQuick,
   nextDeadline,
+  matchupPreviews,
 ].map(c => c.toJSON());
 
 (async () => {

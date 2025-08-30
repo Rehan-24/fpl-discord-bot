@@ -1376,6 +1376,41 @@ async function postConfirmedIfChanged(channel) {
   }
 }
 
+async function generateMatchupPreview(league, gameweek) {
+  // Fetch league table and fixtures
+  const rows = await fetchLeagueTable(league);
+  const teams = normalizeTeams(rows);
+
+  if (!teams.length) {
+    return null;
+  }
+
+  const fixtures = await fetchFixtures(league, gameweek);
+
+  if (!fixtures || fixtures.length === 0) {
+    return null;
+  }
+
+  const matchups = selectDramaticMatchups(teams, { league, fixtures, gw: gameweek });
+  
+  if (!matchups || matchups.length === 0) {
+    return null;
+  }
+
+  // Format the message for matchups
+  let lines = [];
+  matchups.forEach((m, idx) => {
+    const [a, b] = m.pair;
+    const aMent = mentionForOwner(a.owner);
+    const bMent = mentionForOwner(b.owner);
+    lines.push(`Matchup ${idx + 1}:\n${a.team} (${aMent}) [${a.position}] vs ${b.team} (${bMent}) [${b.position}]`);
+    lines.push(`Reason: ${m.reason}`);
+  });
+
+  return lines.join("\n\n");
+}
+
+
 
 
 client.once(Events.ClientReady, async (c) => {
@@ -1398,6 +1433,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "ping") {
     await interaction.reply({ content: "Pong!", ephemeral: true });
     return;
+  }
+
+   if (interaction.commandName === "matchup_previews") {
+    await interaction.deferReply({ ephemeral: false });
+
+    const league = interaction.options.getString("league", true);
+    const gameweek = interaction.options.getInteger("gameweek", true);
+
+    try {
+      // Trigger the matchup preview generation
+      const previewMessage = await generateMatchupPreview(league, gameweek);
+
+      if (previewMessage) {
+        await interaction.editReply(`Here is the matchup preview for GW${gameweek} in the ${league} league:\n\n${previewMessage}`);
+      } else {
+        await interaction.editReply(`No matchups found for GW${gameweek} in the ${league} league.`);
+      }
+    } catch (e) {
+      console.error("Error generating matchup preview:", e);
+      await interaction.editReply("❌ Failed to generate the matchup preview.");
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;

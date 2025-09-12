@@ -1397,51 +1397,51 @@ function findTableByHeaders($, requiredHeaders = []) {
   return found;
 }
 
-function parseConfirmedTable($, $table, teamMap) {
+function indexOfHeader(headers, needles) {
+  const H = headers.map(h => h.toLowerCase().trim());
+  for (const n of needles) {
+    const i = H.findIndex(h => h.includes(n.toLowerCase()));
+    if (i !== -1) return i;
+  }
+  return -1;
+}
+
+function parseConfirmedTable($, $table, idx, teamMap) {
   const out = [];
   if (!$table || !$table.length) return out;
 
-  // header row: prefer thead, else first tr
-  let $hdr = $table.find("thead tr").first();
-  if (!$hdr.length) $hdr = $table.find("tr").first();
+  // Use first data row after header
+  const $rows = $table.find("tr");
+  if (!$rows.length) return out;
 
-  const headerTexts = $hdr.find("th,td").toArray().map(c => $(c).text().trim());
-  // Add an explicit Team column; broaden header matching a bit
-  const nameIdx = pickIndex(headerTexts, ["^player$", "name", "player\\s*name"], 0);
-  const teamIdx = pickIndex(headerTexts, ["^team$", "club", "squad"], -1);
-  const oldIdx  = pickIndex(headerTexts, ["old price", "^old$", "before", "prev"], 1);
-  const newIdx  = pickIndex(headerTexts, ["new price", "^new$", "after"], 2);
-
-  $table.find("tr").each((i, tr) => {
-    // skip header
-    if (i === 0 && !$table.find("thead").length) return;
+  $rows.each((ri, tr) => {
+    // skip header row(s)
+    const inThead = $(tr).closest("thead").length > 0;
+    if (inThead) return;
+    if (ri === 0 && !$table.find("thead").length) return; // first tr is header
 
     const $tds = $(tr).find("td");
     if ($tds.length < 2) return;
 
-    const nameTeamRaw = ($tds.get(nameIdx) ? $($tds.get(nameIdx)).text() : "").trim();
-    if (!nameTeamRaw) return;
+    const get = i => (i >= 0 && $tds.get(i)) ? $($tds.get(i)).text().trim() : "";
 
-    // Pull team from dedicated Team column if present
-    let team = "";
-    if (teamIdx >= 0 && $tds.get(teamIdx)) {
-      team = $($tds.get(teamIdx)).text().trim();
-    }
+    const nameCell = get(idx.name);
+    if (!nameCell) return;
 
-    // If team still empty, allow "(MCI)" style in the Player cell
-    let name = nameTeamRaw;
-    const paren = nameTeamRaw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    let team = get(idx.team);
+    let name = nameCell;
+    // Fallback: "Name (TEAM)" style in the Player cell
+    const paren = nameCell.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
     if (paren) {
       name = paren[1].trim();
       team = team || paren[2].trim();
     } else if (!team && teamMap) {
-      // Fallback: map by web_name
       const key = normalizePlayerKey(name);
       team = teamMap[key] || "";
     }
 
-    const oldTxt = ($tds.get(oldIdx) ? $($tds.get(oldIdx)).text() : "").trim();
-    const newTxt = ($tds.get(newIdx) ? $($tds.get(newIdx)).text() : "").trim();
+    const oldTxt = get(idx.old);
+    const newTxt = get(idx.new);
     const oldP = parseNumberLikePrice(oldTxt);
     const newP = parseNumberLikePrice(newTxt);
     if (!Number.isFinite(oldP) || !Number.isFinite(newP)) return;
@@ -1460,61 +1460,81 @@ async function fetchConfirmedPriceChanges() {
       "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
       "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
-      "Referer": "https://plan.livefpl.net/"
+      "Referer": "https://plan.livefpl.net/",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
     },
+    // ensure axios doesn’t try to parse anything
+    transformResponse: [r => r],
+    validateStatus: s => s >= 200 && s < 400,
   });
+
+  // If Cloudflare/anti-bot page appears, bail with a clear message
+  if (/just a moment/i.test(html) && /cloudflare/i.test(html)) {
+    throw new Error("Blocked by Cloudflare (challenge page). Try different headers or IP.");
+  }
 
   const $ = cheerio.load(html);
-  const teamMap = await fetchFplTeamMap();
+  const teamMap = await fetchFplTeamMap().catch(() => null);
 
-  // Try to find explicit "Risers"/"Fallers" tables first (if the site ever splits them)
-  let $risesTable = null;
-  let $fallsTable = null;
+  // Scan ALL tables and pick those that look like price tables
+  const candidates = [];
+  $("table").each((_, el) => {
+    const $t = $(el);
+    let $hdr = $t.find("thead tr").first();
+    if (!$hdr.length) $hdr = $t.find("tr").first();
 
-  $("h1,h2,h3,h4").each((_, el) => {
-    const text = $(el).text().trim().toLowerCase();
-    if (!text) return;
-    if (/(price\s*)?rises|risers/.test(text) && !$risesTable) {
-      $risesTable = $(el).nextAll("table").first();
-    }
-    if (/(price\s*)?falls|fallers/.test(text) && !$fallsTable) {
-      $fallsTable = $(el).nextAll("table").first();
-    }
+    const headers = $hdr.find("th,td").toArray().map(td => $(td).text().trim());
+    const idx = {
+      name: indexOfHeader(headers, ["player", "name", "player name"]),
+      team: indexOfHeader(headers, ["team", "club", "squad"]),
+      old:  indexOfHeader(headers, ["old price", "old", "before", "prev"]),
+      new:  indexOfHeader(headers, ["new price", "new", "after"]),
+    };
+    const ok = idx.name !== -1 && idx.old !== -1 && idx.new !== -1;
+    if (ok) candidates.push({ $t, headers, idx });
   });
 
-  let risers = [];
-  let fallers = [];
-
-  // If we didn't find explicit tables, the page likely has ONE combined table:
-  if ((!$risesTable || !$risesTable.length) && (!$fallsTable || !$fallsTable.length)) {
-    const $single =
-      findTableByHeaders($, ["player"]) &&
-      findTableByHeaders($, ["player", "team", "old", "new"]) ||
-      findTableByHeaders($, ["player", "old", "new"]); // be lenient if Team missing
-
-    const rows = parseConfirmedTable($, $single, teamMap);
-    risers  = rows.filter(r => r.next > r.old);
-    fallers = rows.filter(r => r.next < r.old);
-    return { risers, fallers };
+  if (process.env.LIVEFPL_DEBUG) {
+    console.log(`[price_changes] tables found: ${$("table").length}`);
+    for (const c of candidates) console.log("[price_changes] headers:", c.headers);
   }
 
-  // Fallback: if the site presents two tables
-  if ($risesTable && $risesTable.length) {
-    risers = parseConfirmedTable($, $risesTable, teamMap).filter(r => r.next >= r.old);
-  }
-  if ($fallsTable && $fallsTable.length) {
-    fallers = parseConfirmedTable($, $fallsTable, teamMap).filter(r => r.next <= r.old);
-  }
-
-  // If we still somehow only parsed one, ensure classification anyway
-  if (!risers.length && $risesTable && $risesTable.length) {
-    const rows = parseConfirmedTable($, $risesTable, teamMap);
-    risers  = rows.filter(r => r.next > r.old);
-    fallers = rows.filter(r => r.next < r.old);
+  let risers = [], fallers = [];
+  for (const c of candidates) {
+    const rows = parseConfirmedTable($, c.$t, c.idx, teamMap);
+    for (const r of rows) {
+      if (r.next > r.old) risers.push(r);
+      else if (r.next < r.old) fallers.push(r);
+    }
   }
 
-  return { risers, fallers };
+  // If still nothing, try the first table anyway (super-fallback)
+  if (!risers.length && !fallers.length && $("table").length) {
+    const $first = $("table").first();
+    let $hdr = $first.find("thead tr").first();
+    if (!$hdr.length) $hdr = $first.find("tr").first();
+    const headers = $hdr.find("th,td").toArray().map(td => $(td).text().trim());
+    const idx = {
+      name: indexOfHeader(headers, ["player", "name"]),
+      team: indexOfHeader(headers, ["team", "club"]),
+      old:  indexOfHeader(headers, ["old", "old price", "prev"]),
+      new:  indexOfHeader(headers, ["new", "new price", "after"]),
+    };
+    const rows = parseConfirmedTable($, $first, idx, teamMap);
+    for (const r of rows) {
+      if (r.next > r.old) risers.push(r);
+      else if (r.next < r.old) fallers.push(r);
+    }
+  }
+
+  // de-dup (same player/team/price)
+  const key = p => `${normalizePlayerKey(p.name)}|${(p.team||"").toLowerCase()}|${p.old}->${p.next}`;
+  const uniq = arr => arr.filter((x, i, self) => self.findIndex(y => key(y) === key(x)) === i);
+
+  return { risers: uniq(risers), fallers: uniq(fallers) };
 }
+
 
 
 function buildConfirmedMessage(chg) {

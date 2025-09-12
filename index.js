@@ -312,6 +312,98 @@ function scheduleWeeklyInTz(label, weekday, hour, minute, tz, fn) {
   scheduleNext();
 }
 
+// ---- DAILY scheduler in a specific TZ (DST-safe) ----
+function msUntilNextDaily(hour, minute, tz) {
+  const now = new Date();
+  const tzNow = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+  const offset = tzNow.getTime() - now.getTime();
+
+  const target = new Date(tzNow);
+  target.setHours(hour, minute, 0, 0);
+  if (target <= tzNow) target.setDate(target.getDate() + 1);
+
+  const realTarget = new Date(target.getTime() - offset);
+  return Math.max(0, realTarget.getTime() - now.getTime());
+}
+
+function scheduleDailyInTz(label, hour, minute, tz, fn) {
+  const scheduleNext = () => {
+    const ms = msUntilNextDaily(hour, minute, tz);
+    console.log(`[${label}] next run in ${Math.round(ms / 60000)} min`);
+    setTimeout(async () => {
+      try {
+        await fn();
+      } catch (e) {
+        console.log(`[${label}] job error:`, e?.message || e);
+      } finally {
+        scheduleNext(); // re-schedule (handles DST shifts too)
+      }
+    }, ms);
+  };
+  scheduleNext();
+}
+
+// ---- schedule a function at multiple local times each day (DST-safe) ----
+function scheduleAtLocalTimes(label, times /* ["HH:MM", ...] */, tz, fn) {
+  const parseHM = (s) => {
+    const [h, m] = String(s).split(":").map(n => parseInt(n, 10));
+    return [Number.isFinite(h) ? h : 0, Number.isFinite(m) ? m : 0];
+  };
+
+  const msUntilNext = () => {
+    const now = new Date();
+    const tzNow = new Date(now.toLocaleString("en-US", { timeZone: tz }));
+    const offset = tzNow.getTime() - now.getTime();
+
+    // build today candidates
+    const cands = [];
+    for (const t of times) {
+      const [h, m] = parseHM(t);
+      const targetLocal = new Date(tzNow);
+      targetLocal.setHours(h, m, 0, 0);
+      if (targetLocal > tzNow) {
+        cands.push(new Date(targetLocal.getTime() - offset));
+      }
+    }
+    // if none left today, take the earliest tomorrow
+    if (!cands.length) {
+      const [h0, m0] = parseHM(times[0]);
+      const tomorrowLocal = new Date(tzNow);
+      tomorrowLocal.setDate(tomorrowLocal.getDate() + 1);
+      tomorrowLocal.setHours(h0, m0, 0, 0);
+      cands.push(new Date(tomorrowLocal.getTime() - offset));
+    }
+
+    const next = cands.sort((a, b) => a - b)[0];
+    return Math.max(0, next.getTime() - now.getTime());
+  };
+
+  const loop = () => {
+    const ms = msUntilNext();
+    console.log(`[${label}] next run in ${Math.round(ms/60000)} min`);
+    setTimeout(async () => {
+      try {
+        await fn();
+      } catch (e) {
+        console.log(`[${label}] job error:`, e?.message || e);
+      } finally {
+        loop(); // schedule the next occurrence
+      }
+    }, ms);
+  };
+  loop();
+}
+
+function schedulePredictedFixedTimesPT(channel, times = (process.env.PREDICTED_LOCAL_TIMES || "08:00,11:00,15:30,17:30,18:00"), tz = "America/Los_Angeles") {
+  const list = String(times).split(",").map(s => s.trim()).filter(Boolean);
+  scheduleAtLocalTimes("Predicted Prices", list, tz, async () => {
+    await postPredictedIfChanged(channel);
+  });
+}
+
+
+
+
 // Post both Premier & Championship weekly FPL Mundo articles
 async function postWeeklyFplMundoArticles() {
   const gw = await getLatestFinishedGwNumber();
@@ -1021,28 +1113,25 @@ function schedulePredictedEvery(channel, minutes = 120) {
   setInterval(run, Math.max(1, minutes) * 60 * 1000);
 }
 
-// Post confirmed changes exactly once each day at the given UTC time
-function scheduleConfirmedDaily(channel, hhmm = "01:30") {
-  const runOnce = async () => {
+// Post confirmed changes exactly once each day at 6:30 PM America/Los_Angeles
+function scheduleConfirmedDailyPT(channel, hhmm = (process.env.CONFIRMED_PRICE_LOCAL_TIME || "18:30"), tz = (process.env.CONFIRMED_PRICE_TZ || "America/Los_Angeles")) {
+  const [h, m] = String(hhmm).split(":").map(n => parseInt(n, 10));
+  scheduleDailyInTz("Confirmed Prices Daily", Number.isFinite(h) ? h : 18, Number.isFinite(m) ? m : 30, tz, async () => {
     try {
-      // This helper should fetch https://plan.livefpl.net/price_changes
-      // and post the *daily* snapshot (you can still dedupe by date if you want)
-      await postConfirmedIfChanged(channel, { forcePostAtDailyTime: true });
+      await postConfirmedIfChanged(channel);
     } catch (e) {
       console.log("confirmed daily error:", e?.message || e);
-    } finally {
-      // Schedule the next day after it runs
-      setTimeout(runOnce, 24 * 60 * 60 * 1000);
     }
-  };
-  setTimeout(runOnce, msUntilNextUtc(hhmm));
+  });
 }
+
 
 async function schedulePriceWatchers(client) {
   if (!PRICE_CHANNEL_ID) {
     console.log("PRICE_CHANNEL_ID not set — skipping price watchers.");
     return;
   }
+
   let channel;
   try {
     channel = await client.channels.fetch(PRICE_CHANNEL_ID);
@@ -1051,12 +1140,20 @@ async function schedulePriceWatchers(client) {
     return;
   }
 
-  // Predictions: every 8 hours by default
-  schedulePredictedEvery(channel, PREDICTED_PRICE_POLL_MIN); // default 120
+  // Predictions at fixed local times (PST/PDT)
+  schedulePredictedFixedTimesPT(channel); // 08:00, 11:00, 15:30, 17:30, 18:00 by default
 
-  // Confirmed: once per day at 01:30 UTC
-  scheduleConfirmedDaily(channel, CONFIRMED_PRICE_POST_UTC); // default "01:30"
+  // confirmed once per day (keep your existing PT scheduler if you already added it)
+  // If you previously switched to the Pacific-time one I gave you:
+  if (typeof scheduleConfirmedDailyPT === "function") {
+    scheduleConfirmedDailyPT(channel); // 18:30 PT by default (can be env-controlled)
+  } else {
+    // otherwise your existing UTC-based function will still run
+    scheduleConfirmedDaily(channel, CONFIRMED_PRICE_POST_UTC);
+  }
 }
+
+
 
 // Cache to avoid duplicate posts
 let __LAST_PRED_SIG = "";
@@ -1265,92 +1362,150 @@ async function postPredictedIfChanged(channel) {
 }
 
 // ---------- CONFIRMED (plan.livefpl.net/price_changes) ----------
-// Fetch confirmed price changes from LiveFPL
+function pickIndex(headers, patterns, fallback) {
+  const joined = headers.map(h => h.toLowerCase().trim());
+  for (const p of patterns) {
+    const re = new RegExp(p, "i");
+    const i = joined.findIndex(h => re.test(h));
+    if (i !== -1) return i;
+  }
+  return fallback;
+}
+
+function parseNumberLikePrice(s) {
+  if (s == null) return NaN;
+  const n = Number(String(s).replace(/[^\d.]+/g, ""));
+  // if something like 105 (FPL integer tenths), turn into 10.5
+  return Number.isInteger(n) && n >= 20 ? n / 10 : n;
+}
+
+function parseConfirmedTable($, $table, teamMap) {
+  const out = [];
+  const rows = $table.find("tr");
+  if (!rows.length) return out;
+
+  // Header row: prefer <th>, else the first row
+  let $hdr = rows.first();
+  const hdrCells = $hdr.find("th");
+  if (!hdrCells.length) {
+    // might be <td> headers — treat first row as header if it contains words like 'old', 'new' etc.
+    const candidate = $hdr.find("td").toArray().map(td => $(td).text().trim().toLowerCase());
+    if (!candidate.some(t => /(old|new|price|player|name)/i.test(t))) {
+      // then try THEAD if present
+      const thead = $table.find("thead tr").first();
+      if (thead.length) $hdr = thead;
+    }
+  }
+
+  const headerTexts = $hdr.find("th,td").toArray().map(c => $(c).text().trim());
+  const nameIdx = pickIndex(headerTexts, ["^player$", "name", "player\\s*name"], 0);
+  const oldIdx  = pickIndex(headerTexts, ["old", "before", "prev"], 1);
+  const newIdx  = pickIndex(headerTexts, ["new", "after"], 2);
+
+  rows.each((i, tr) => {
+    // skip the header row itself
+    if (i === 0) return;
+
+    const $tds = $(tr).find("td");
+    if ($tds.length < 2) return;
+
+    const nameTeamRaw = ($tds.get(nameIdx) ? $($tds.get(nameIdx)).text() : "").trim();
+    if (!nameTeamRaw) return;
+
+    // e.g. "Erling Haaland (MCI)" → name + team
+    let name = nameTeamRaw;
+    let team = "";
+    const m = nameTeamRaw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    if (m) {
+      name = m[1].trim();
+      team = m[2].trim();
+    } else if (!team) {
+      // fallback to team map (by web_name) if parentheses missing
+      const key = normalizePlayerKey(name);
+      team = (teamMap && teamMap[key]) || "";
+    }
+
+    const oldTxt = ($tds.get(oldIdx) ? $($tds.get(oldIdx)).text() : "").trim();
+    const newTxt = ($tds.get(newIdx) ? $($tds.get(newIdx)).text() : "").trim();
+    const oldP = parseNumberLikePrice(oldTxt);
+    const newP = parseNumberLikePrice(newTxt);
+
+    if (!Number.isFinite(oldP) || !Number.isFinite(newP)) return;
+    out.push({ name, team, old: oldP, next: newP });
+  });
+
+  return out;
+}
+
 async function fetchConfirmedPriceChanges() {
   const url = "https://plan.livefpl.net/price_changes";
   const { data: html } = await axios.get(url, {
     timeout: 20000,
     headers: {
-      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)"
+      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
+      "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  const $ = cheerio.load(html);
+
+  // get FPL team map so we can fill teams even if page omits parentheses
+  const teamMap = await fetchFplTeamMap();
+
+  // Find tables by nearby headings to be resilient to layout changes
+  let $risesTable = null;
+  let $fallsTable = null;
+
+  $("h1,h2,h3,h4").each((_, el) => {
+    const text = $(el).text().trim().toLowerCase();
+    if (!text) return;
+    if (/(price\s*)?rises|risers/.test(text) && !$risesTable) {
+      $risesTable = $(el).nextAll("table").first();
+    }
+    if (/(price\s*)?falls|fallers/.test(text) && !$fallsTable) {
+      $fallsTable = $(el).nextAll("table").first();
     }
   });
 
-  // Parse confirmed price changes from the HTML content
-  const $ = cheerio.load(html);
-  
-  // We'll extract the price change sections similarly to how we did for predicted prices
-  const parseConfirmedPriceChanges = ($) => {
-    const risers = [];
-    const fallers = [];
-    
-    // Extract risers
-    $("table").eq(0).find("tr").each((i, el) => {
-      if (i === 0) return; // Skip the header row
-      const tds = $(el).find("td");
-      if (tds.length < 3) return; // Skip rows that don't have enough columns
-      
-      const nameTeam = $(tds[0]).text().trim();
-      const teamMatch = nameTeam.match(/\(([^)]+)\)/);
-      const name = teamMatch ? nameTeam.split(' (')[0] : nameTeam;
-      const team = teamMatch ? teamMatch[1] : "";
-      const oldPrice = parseFloat($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
-      const newPrice = parseFloat($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
-      
-      if (isFinite(oldPrice) && isFinite(newPrice)) {
-        risers.push({ name, team, old: oldPrice, next: newPrice });
-      }
-    });
+  // Fallback: if headings changed, just take first two tables
+  if (!$risesTable || !$risesTable.length || !$fallsTable || !$fallsTable.length) {
+    const tabs = $("table");
+    if ((!$risesTable || !$risesTable.length) && tabs.eq(0).length) $risesTable = tabs.eq(0);
+    if ((!$fallsTable || !$fallsTable.length) && tabs.eq(1).length) $fallsTable = tabs.eq(1);
+  }
 
-    // Extract fallers
-    $("table").eq(1).find("tr").each((i, el) => {
-      if (i === 0) return; // Skip the header row
-      const tds = $(el).find("td");
-      if (tds.length < 3) return; // Skip rows that don't have enough columns
-      
-      const nameTeam = $(tds[0]).text().trim();
-      const teamMatch = nameTeam.match(/\(([^)]+)\)/);
-      const name = teamMatch ? nameTeam.split(' (')[0] : nameTeam;
-      const team = teamMatch ? teamMatch[1] : "";
-      const oldPrice = parseFloat($(tds[1]).text().trim().replace(/[^\d.]/g, ""));
-      const newPrice = parseFloat($(tds[2]).text().trim().replace(/[^\d.]/g, ""));
-      
-      if (isFinite(oldPrice) && isFinite(newPrice)) {
-        fallers.push({ name, team, old: oldPrice, next: newPrice });
-      }
-    });
+  const risers = $risesTable && $risesTable.length ? parseConfirmedTable($, $risesTable, teamMap) : [];
+  const fallers = $fallsTable && $fallsTable.length ? parseConfirmedTable($, $fallsTable, teamMap) : [];
 
-    return { risers, fallers };
-  };
-
-  const priceChanges = parseConfirmedPriceChanges($);
-  return priceChanges;
+  return { risers, fallers };
 }
-
-
 
 function buildConfirmedMessage(chg) {
   const lines = [];
-  lines.push("**PRICE CHANGE:**");
-  lines.push("");
+  lines.push("**PRICE CHANGE:**", "");
 
   lines.push("**Risers:**");
   if (chg.risers.length) {
     chg.risers.forEach(p => {
-      lines.push(`**${p.name}** (${p.team}) - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
+      const teamText = p.team ? ` (${p.team})` : "";
+      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");
   }
 
-  lines.push("");
-  lines.push("**Fallers:**");
+  lines.push("", "**Fallers:**");
   if (chg.fallers.length) {
     chg.fallers.forEach(p => {
-      lines.push(`**${p.name}** (${p.team}) - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
+      const teamText = p.team ? ` (${p.team})` : "";
+      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");
   }
+
+  // 👇 add the LiveFPL plan page link at the end
+  lines.push("", "Source: https://plan.livefpl.net/price_changes");
 
   return lines.join("\n");
 }
@@ -1359,11 +1514,11 @@ function buildConfirmedMessage(chg) {
 async function postConfirmedIfChanged(channel) {
   try {
     const chg = await fetchConfirmedPriceChanges();
-    
-    // Create a compact signature to dedupe
+
+    // Compact signature to avoid duplicates if a restart happens around post time
     const sig = JSON.stringify({
-      r: chg.risers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
-      f: chg.fallers.map(x => `${x.name}|${x.team}|${x.old}->${x.next}`).slice(0, 100),
+      r: chg.risers.map(x => `${normalizePlayerKey(x.name)}|${(x.team||"").toLowerCase()}|${toPriceFloat(x.old)}->${toPriceFloat(x.next)}`).slice(0, 100),
+      f: chg.fallers.map(x => `${normalizePlayerKey(x.name)}|${(x.team||"").toLowerCase()}|${toPriceFloat(x.old)}->${toPriceFloat(x.next)}`).slice(0, 100),
     });
 
     if (!sig || sig === __LAST_CONF_SIG) return;
@@ -1375,6 +1530,7 @@ async function postConfirmedIfChanged(channel) {
     console.log("Confirmed price watcher error:", e?.message || e);
   }
 }
+
 
 async function generateMatchupPreview(league, gameweek) {
   // Fetch league table and fixtures
@@ -1424,8 +1580,9 @@ async function generateMatchupPreview(league, gameweek) {
 
 
 client.once(Events.ClientReady, async (c) => {
-  try { await maybePostPrevGwSummaries(); } catch (_) {}
-  try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
+  //try { await maybePostPrevGwSummaries(); } catch (_) {}
+  //try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
+  try { setInterval(() => { maybePostPrevGwSummaries().catch(()=>{}); }, 24*60*60*1000); } catch (_) {}
   try { loadRivalriesSync(); } catch (_) {}
   try { await refreshManagerDiscordMap(); } catch (_) {}
   try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}

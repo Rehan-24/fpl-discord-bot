@@ -1552,7 +1552,7 @@ function buildConfirmedMessage(chg) {
   }
 
   // add the LiveFPL plan page link at the end
-  lines.push("", "Source: https://plan.livefpl.net/price_changes");
+  //lines.push("", "Source: https://plan.livefpl.net/price_changes");
 
   return lines.join("\n");
 }

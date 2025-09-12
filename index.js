@@ -1379,23 +1379,6 @@ function parseNumberLikePrice(s) {
   return Number.isInteger(n) && n >= 20 ? n / 10 : n;
 }
 
-// Find a table that contains certain header names (case-insensitive)
-function findTableByHeaders($, requiredHeaders = []) {
-  let found = null;
-  $("table").each((_, el) => {
-    // header row: prefer thead, else first tr
-    const $el = $(el);
-    let $hdr = $el.find("thead tr").first();
-    if (!$hdr.length) $hdr = $el.find("tr").first();
-
-    const headers = $hdr.find("th,td").toArray().map(c => $(c).text().trim().toLowerCase());
-    const hasAll = requiredHeaders.every(req =>
-      headers.some(h => h.includes(req.toLowerCase()))
-    );
-    if (hasAll) { found = $el; return false; } // break
-  });
-  return found;
-}
 
 function indexOfHeader(headers, needles) {
   const H = headers.map(h => h.toLowerCase().trim());
@@ -1406,31 +1389,53 @@ function indexOfHeader(headers, needles) {
   return -1;
 }
 
-function parseConfirmedTable($, $table, idx, teamMap) {
+// Find the REAL header row inside a table (often NOT the first <tr>)
+function detectHeaderRow($, $table) {
+  const rows = $table.find("tr").toArray();
+  // Look through <thead> rows first, then the first few <tr> in the table
+  const candidates = [
+    ...$table.find("thead tr").toArray(),
+    ...rows.slice(0, 6)  // scan first 6 rows for safety
+  ];
+
+  for (const tr of candidates) {
+    const headers = $(tr).find("th,td").toArray().map(td => $(td).text().trim());
+    if (!headers.length) continue;
+
+    const idx = {
+      name: indexOfHeader(headers, ["player", "name", "player name"]),
+      team: indexOfHeader(headers, ["team", "club", "squad"]),
+      old:  indexOfHeader(headers, ["old price", "old", "before", "prev"]),
+      next: indexOfHeader(headers, ["new price", "new", "after"]),
+    };
+
+    // Must have name + old + new to consider it a proper header row
+    if (idx.name !== -1 && idx.old !== -1 && idx.next !== -1) {
+      return { headerRow: tr, headerIndex: rows.indexOf(tr), headers, idx };
+    }
+  }
+  return null;
+}
+
+function parseConfirmedTable($, $table, meta, teamMap) {
   const out = [];
-  if (!$table || !$table.length) return out;
+  if (!$table || !$table.length || !meta) return out;
 
-  // Use first data row after header
-  const $rows = $table.find("tr");
-  if (!$rows.length) return out;
+  const rows = $table.find("tr").toArray();
+  // Start parsing from the row AFTER the detected header row
+  for (let i = meta.headerIndex + 1; i < rows.length; i++) {
+    const $tds = $(rows[i]).find("td");
+    if ($tds.length < 2) continue;
 
-  $rows.each((ri, tr) => {
-    // skip header row(s)
-    const inThead = $(tr).closest("thead").length > 0;
-    if (inThead) return;
-    if (ri === 0 && !$table.find("thead").length) return; // first tr is header
+    const get = (ix) => (ix >= 0 && $tds.get(ix)) ? $($tds.get(ix)).text().trim() : "";
 
-    const $tds = $(tr).find("td");
-    if ($tds.length < 2) return;
+    const nameCell = get(meta.idx.name);
+    if (!nameCell) continue;
 
-    const get = i => (i >= 0 && $tds.get(i)) ? $($tds.get(i)).text().trim() : "";
-
-    const nameCell = get(idx.name);
-    if (!nameCell) return;
-
-    let team = get(idx.team);
+    let team = meta.idx.team >= 0 ? get(meta.idx.team) : "";
     let name = nameCell;
-    // Fallback: "Name (TEAM)" style in the Player cell
+
+    // Fallback: "Name (TEAM)" packed into the Player cell
     const paren = nameCell.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
     if (paren) {
       name = paren[1].trim();
@@ -1440,14 +1445,12 @@ function parseConfirmedTable($, $table, idx, teamMap) {
       team = teamMap[key] || "";
     }
 
-    const oldTxt = get(idx.old);
-    const newTxt = get(idx.new);
-    const oldP = parseNumberLikePrice(oldTxt);
-    const newP = parseNumberLikePrice(newTxt);
-    if (!Number.isFinite(oldP) || !Number.isFinite(newP)) return;
+    const oldP = parseNumberLikePrice(get(meta.idx.old));
+    const newP = parseNumberLikePrice(get(meta.idx.next));
+    if (!Number.isFinite(oldP) || !Number.isFinite(newP)) continue;
 
     out.push({ name, team, old: oldP, next: newP });
-  });
+  }
 
   return out;
 }
@@ -1464,76 +1467,63 @@ async function fetchConfirmedPriceChanges() {
       "Cache-Control": "no-cache",
       "Pragma": "no-cache",
     },
-    // ensure axios doesn’t try to parse anything
     transformResponse: [r => r],
     validateStatus: s => s >= 200 && s < 400,
   });
 
-  // If Cloudflare/anti-bot page appears, bail with a clear message
   if (/just a moment/i.test(html) && /cloudflare/i.test(html)) {
-    throw new Error("Blocked by Cloudflare (challenge page). Try different headers or IP.");
+    throw new Error("Blocked by Cloudflare (challenge page).");
   }
 
   const $ = cheerio.load(html);
   const teamMap = await fetchFplTeamMap().catch(() => null);
 
-  // Scan ALL tables and pick those that look like price tables
-  const candidates = [];
-  $("table").each((_, el) => {
-    const $t = $(el);
-    let $hdr = $t.find("thead tr").first();
-    if (!$hdr.length) $hdr = $t.find("tr").first();
+  const $tables = $("table");
+  if (process.env.LIVEFPL_DEBUG) {
+    console.log(`[price_changes] tables found: ${$tables.length}`);
+  }
+  if (!$tables.length) return { risers: [], fallers: [] };
 
-    const headers = $hdr.find("th,td").toArray().map(td => $(td).text().trim());
-    const idx = {
-      name: indexOfHeader(headers, ["player", "name", "player name"]),
-      team: indexOfHeader(headers, ["team", "club", "squad"]),
-      old:  indexOfHeader(headers, ["old price", "old", "before", "prev"]),
-      new:  indexOfHeader(headers, ["new price", "new", "after"]),
-    };
-    const ok = idx.name !== -1 && idx.old !== -1 && idx.new !== -1;
-    if (ok) candidates.push({ $t, headers, idx });
+  // Build candidates with detected header rows (in DOM order)
+  const candidates = [];
+  $tables.each((_, el) => {
+    const $t = $(el);
+    const meta = detectHeaderRow($, $t);
+    if (meta) {
+      candidates.push({ $t, meta });
+      if (process.env.LIVEFPL_DEBUG) {
+        console.log("[price_changes] header:", meta.headers);
+      }
+    }
   });
 
-  if (process.env.LIVEFPL_DEBUG) {
-    console.log(`[price_changes] tables found: ${$("table").length}`);
-    for (const c of candidates) console.log("[price_changes] headers:", c.headers);
+  if (!candidates.length) {
+    if (process.env.LIVEFPL_DEBUG) console.log("[price_changes] no header rows detected");
+    return { risers: [], fallers: [] };
   }
 
-  let risers = [], fallers = [];
-  for (const c of candidates) {
-    const rows = parseConfirmedTable($, c.$t, c.idx, teamMap);
-    for (const r of rows) {
-      if (r.next > r.old) risers.push(r);
-      else if (r.next < r.old) fallers.push(r);
-    }
-  }
+  // Parse ONLY the first candidate (top-most = latest day)
+  const { $t, meta } = candidates[0];
+  const rows = parseConfirmedTable($, $t, meta, teamMap);
 
-  // If still nothing, try the first table anyway (super-fallback)
-  if (!risers.length && !fallers.length && $("table").length) {
-    const $first = $("table").first();
-    let $hdr = $first.find("thead tr").first();
-    if (!$hdr.length) $hdr = $first.find("tr").first();
-    const headers = $hdr.find("th,td").toArray().map(td => $(td).text().trim());
-    const idx = {
-      name: indexOfHeader(headers, ["player", "name"]),
-      team: indexOfHeader(headers, ["team", "club"]),
-      old:  indexOfHeader(headers, ["old", "old price", "prev"]),
-      new:  indexOfHeader(headers, ["new", "new price", "after"]),
-    };
-    const rows = parseConfirmedTable($, $first, idx, teamMap);
-    for (const r of rows) {
-      if (r.next > r.old) risers.push(r);
-      else if (r.next < r.old) fallers.push(r);
-    }
-  }
+  // Classify
+  let risers  = rows.filter(r => r.next > r.old);
+  let fallers = rows.filter(r => r.next < r.old);
 
-  // de-dup (same player/team/price)
+  // Dedup safety
   const key = p => `${normalizePlayerKey(p.name)}|${(p.team||"").toLowerCase()}|${p.old}->${p.next}`;
   const uniq = arr => arr.filter((x, i, self) => self.findIndex(y => key(y) === key(x)) === i);
 
-  return { risers: uniq(risers), fallers: uniq(fallers) };
+  risers = uniq(risers);
+  fallers = uniq(fallers);
+
+  if (process.env.LIVEFPL_DEBUG) {
+    console.log(`[price_changes] parsed rows: ${rows.length} (risers: ${risers.length}, fallers: ${fallers.length})`);
+  }
+
+  return { risers, fallers };
 }
+
 
 
 

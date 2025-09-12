@@ -1379,32 +1379,42 @@ function parseNumberLikePrice(s) {
   return Number.isInteger(n) && n >= 20 ? n / 10 : n;
 }
 
+// Find a table that contains certain header names (case-insensitive)
+function findTableByHeaders($, requiredHeaders = []) {
+  let found = null;
+  $("table").each((_, el) => {
+    // header row: prefer thead, else first tr
+    const $el = $(el);
+    let $hdr = $el.find("thead tr").first();
+    if (!$hdr.length) $hdr = $el.find("tr").first();
+
+    const headers = $hdr.find("th,td").toArray().map(c => $(c).text().trim().toLowerCase());
+    const hasAll = requiredHeaders.every(req =>
+      headers.some(h => h.includes(req.toLowerCase()))
+    );
+    if (hasAll) { found = $el; return false; } // break
+  });
+  return found;
+}
+
 function parseConfirmedTable($, $table, teamMap) {
   const out = [];
-  const rows = $table.find("tr");
-  if (!rows.length) return out;
+  if (!$table || !$table.length) return out;
 
-  // Header row: prefer <th>, else the first row
-  let $hdr = rows.first();
-  const hdrCells = $hdr.find("th");
-  if (!hdrCells.length) {
-    // might be <td> headers — treat first row as header if it contains words like 'old', 'new' etc.
-    const candidate = $hdr.find("td").toArray().map(td => $(td).text().trim().toLowerCase());
-    if (!candidate.some(t => /(old|new|price|player|name)/i.test(t))) {
-      // then try THEAD if present
-      const thead = $table.find("thead tr").first();
-      if (thead.length) $hdr = thead;
-    }
-  }
+  // header row: prefer thead, else first tr
+  let $hdr = $table.find("thead tr").first();
+  if (!$hdr.length) $hdr = $table.find("tr").first();
 
   const headerTexts = $hdr.find("th,td").toArray().map(c => $(c).text().trim());
+  // Add an explicit Team column; broaden header matching a bit
   const nameIdx = pickIndex(headerTexts, ["^player$", "name", "player\\s*name"], 0);
-  const oldIdx  = pickIndex(headerTexts, ["old", "before", "prev"], 1);
-  const newIdx  = pickIndex(headerTexts, ["new", "after"], 2);
+  const teamIdx = pickIndex(headerTexts, ["^team$", "club", "squad"], -1);
+  const oldIdx  = pickIndex(headerTexts, ["old price", "^old$", "before", "prev"], 1);
+  const newIdx  = pickIndex(headerTexts, ["new price", "^new$", "after"], 2);
 
-  rows.each((i, tr) => {
-    // skip the header row itself
-    if (i === 0) return;
+  $table.find("tr").each((i, tr) => {
+    // skip header
+    if (i === 0 && !$table.find("thead").length) return;
 
     const $tds = $(tr).find("td");
     if ($tds.length < 2) return;
@@ -1412,25 +1422,30 @@ function parseConfirmedTable($, $table, teamMap) {
     const nameTeamRaw = ($tds.get(nameIdx) ? $($tds.get(nameIdx)).text() : "").trim();
     if (!nameTeamRaw) return;
 
-    // e.g. "Erling Haaland (MCI)" → name + team
-    let name = nameTeamRaw;
+    // Pull team from dedicated Team column if present
     let team = "";
-    const m = nameTeamRaw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
-    if (m) {
-      name = m[1].trim();
-      team = m[2].trim();
-    } else if (!team) {
-      // fallback to team map (by web_name) if parentheses missing
+    if (teamIdx >= 0 && $tds.get(teamIdx)) {
+      team = $($tds.get(teamIdx)).text().trim();
+    }
+
+    // If team still empty, allow "(MCI)" style in the Player cell
+    let name = nameTeamRaw;
+    const paren = nameTeamRaw.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    if (paren) {
+      name = paren[1].trim();
+      team = team || paren[2].trim();
+    } else if (!team && teamMap) {
+      // Fallback: map by web_name
       const key = normalizePlayerKey(name);
-      team = (teamMap && teamMap[key]) || "";
+      team = teamMap[key] || "";
     }
 
     const oldTxt = ($tds.get(oldIdx) ? $($tds.get(oldIdx)).text() : "").trim();
     const newTxt = ($tds.get(newIdx) ? $($tds.get(newIdx)).text() : "").trim();
     const oldP = parseNumberLikePrice(oldTxt);
     const newP = parseNumberLikePrice(newTxt);
-
     if (!Number.isFinite(oldP) || !Number.isFinite(newP)) return;
+
     out.push({ name, team, old: oldP, next: newP });
   });
 
@@ -1444,15 +1459,15 @@ async function fetchConfirmedPriceChanges() {
     headers: {
       "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
       "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Referer": "https://plan.livefpl.net/"
     },
   });
 
   const $ = cheerio.load(html);
-
-  // get FPL team map so we can fill teams even if page omits parentheses
   const teamMap = await fetchFplTeamMap();
 
-  // Find tables by nearby headings to be resilient to layout changes
+  // Try to find explicit "Risers"/"Fallers" tables first (if the site ever splits them)
   let $risesTable = null;
   let $fallsTable = null;
 
@@ -1467,18 +1482,40 @@ async function fetchConfirmedPriceChanges() {
     }
   });
 
-  // Fallback: if headings changed, just take first two tables
-  if (!$risesTable || !$risesTable.length || !$fallsTable || !$fallsTable.length) {
-    const tabs = $("table");
-    if ((!$risesTable || !$risesTable.length) && tabs.eq(0).length) $risesTable = tabs.eq(0);
-    if ((!$fallsTable || !$fallsTable.length) && tabs.eq(1).length) $fallsTable = tabs.eq(1);
+  let risers = [];
+  let fallers = [];
+
+  // If we didn't find explicit tables, the page likely has ONE combined table:
+  if ((!$risesTable || !$risesTable.length) && (!$fallsTable || !$fallsTable.length)) {
+    const $single =
+      findTableByHeaders($, ["player"]) &&
+      findTableByHeaders($, ["player", "team", "old", "new"]) ||
+      findTableByHeaders($, ["player", "old", "new"]); // be lenient if Team missing
+
+    const rows = parseConfirmedTable($, $single, teamMap);
+    risers  = rows.filter(r => r.next > r.old);
+    fallers = rows.filter(r => r.next < r.old);
+    return { risers, fallers };
   }
 
-  const risers = $risesTable && $risesTable.length ? parseConfirmedTable($, $risesTable, teamMap) : [];
-  const fallers = $fallsTable && $fallsTable.length ? parseConfirmedTable($, $fallsTable, teamMap) : [];
+  // Fallback: if the site presents two tables
+  if ($risesTable && $risesTable.length) {
+    risers = parseConfirmedTable($, $risesTable, teamMap).filter(r => r.next >= r.old);
+  }
+  if ($fallsTable && $fallsTable.length) {
+    fallers = parseConfirmedTable($, $fallsTable, teamMap).filter(r => r.next <= r.old);
+  }
+
+  // If we still somehow only parsed one, ensure classification anyway
+  if (!risers.length && $risesTable && $risesTable.length) {
+    const rows = parseConfirmedTable($, $risesTable, teamMap);
+    risers  = rows.filter(r => r.next > r.old);
+    fallers = rows.filter(r => r.next < r.old);
+  }
 
   return { risers, fallers };
 }
+
 
 function buildConfirmedMessage(chg) {
   const lines = [];

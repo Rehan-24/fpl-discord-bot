@@ -1504,11 +1504,57 @@ function buildConfirmedMessage(chg) {
     lines.push("_None_");
   }
 
-  // 👇 add the LiveFPL plan page link at the end
+  // add the LiveFPL plan page link at the end
   lines.push("", "Source: https://plan.livefpl.net/price_changes");
 
   return lines.join("\n");
 }
+
+// Append a source link cleanly to any message
+function appendSource(msg, url) {
+  const trimmed = (msg || "").trim();
+  if (!trimmed) return trimmed;
+  return `${trimmed}\n\nSource: ${url}`;
+}
+
+// On-demand: show current predicted changes
+async function handlePricePredictionsCmd(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+  try {
+    const pred = await fetchPredictedFromLiveFPL();
+    const noData = (!pred?.risers?.length && !pred?.fallers?.length);
+    const msg = noData
+      ? "**POTENTIAL PRICE CHANGES:**\n\n_No players are currently ≥100% to rise or ≤−100% to fall._"
+      : buildPredictedMessage(pred);
+
+    // Add LiveFPL link
+    const withLink = appendSource(msg, "https://www.livefpl.net/prices");
+    await interaction.editReply(withLink);
+  } catch (e) {
+    console.log("predictions slash error:", e?.message || e);
+    await interaction.editReply("❌ Failed to fetch predicted price changes.");
+  }
+}
+
+// On-demand: show last confirmed changes
+async function handlePriceChangesCmd(interaction) {
+  await interaction.deferReply({ ephemeral: false });
+  try {
+    const chg = await fetchConfirmedPriceChanges();
+    const noData = (!chg?.risers?.length && !chg?.fallers?.length);
+    const msg = noData
+      ? "**PRICE CHANGE:**\n\n_No confirmed rises or falls posted yet._"
+      : buildConfirmedMessage(chg);
+
+    // Add plan.livefpl link (as requested)
+    const withLink = appendSource(msg, "https://plan.livefpl.net/price_changes");
+    await interaction.editReply(withLink);
+  } catch (e) {
+    console.log("confirmed slash error:", e?.message || e);
+    await interaction.editReply("❌ Failed to fetch confirmed price changes.");
+  }
+}
+
 
 
 async function postConfirmedIfChanged(channel) {
@@ -1599,6 +1645,18 @@ client.once(Events.ClientReady, async (c) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "ping") {
     await interaction.reply({ content: "Pong!", ephemeral: true });
+    return;
+  }
+
+    // NEW: /price_predictions
+  if (interaction.commandName === "price_predictions") {
+    await handlePricePredictionsCmd(interaction);
+    return;
+  }
+
+  // NEW: /price_changes
+  if (interaction.commandName === "price_changes") {
+    await handlePriceChangesCmd(interaction);
     return;
   }
 

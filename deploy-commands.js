@@ -6,6 +6,17 @@ const nextDeadline = new SlashCommandBuilder()
   .setName("next_deadline")
   .setDescription("Show the next FPL deadline with PST/EST times");
 
+  
+// /price_predictions — LiveFPL predicted risers/fallers now
+const pricePredictions = new SlashCommandBuilder()
+  .setName("price_predictions")
+  .setDescription("Show current predicted FPL price risers and fallers (LiveFPL)");
+
+// /price_changes — last confirmed changes
+const priceChanges = new SlashCommandBuilder()
+  .setName("price_changes")
+  .setDescription("Show the most recently confirmed FPL price changes");
+
 
 /* -------------------- News commands -------------------- */
 // /publish_news — required first, then optional
@@ -159,6 +170,8 @@ const commands = [
   newsQuick,
   nextDeadline,
   matchupPreviews,
+  pricePredictions,
+  priceChanges,
 ].map(c => c.toJSON());
 
 (async () => {

@@ -1086,7 +1086,7 @@ const PRICE_CHANNEL_ID = process.env.PRICE_CHANNEL_ID || process.env.DEADLINE_CH
 
 // Defaults: predictions every 120 min; confirmed at 01:30 UTC (GMT)
 const PREDICTED_PRICE_POLL_MIN = parseInt(process.env.PREDICTED_PRICE_POLL_MIN || "120", 10);
-const CONFIRMED_PRICE_POST_UTC = process.env.CONFIRMED_PRICE_POST_UTC || "01:30"; // "HH:MM" 24h UTC
+const CONFIRMED_PRICE_POST_UTC = process.env.CONFIRMED_PRICE_POST_UTC || "01:45"; // "HH:MM" 24h UTC
 
 function msUntilNextUtc(hhmm) {
   const [h, m] = (hhmm || "01:30").split(":").map(Number);
@@ -1116,7 +1116,7 @@ function schedulePredictedEvery(channel, minutes = 120) {
 // Post confirmed changes exactly once each day at 6:30 PM America/Los_Angeles
 function scheduleConfirmedDailyPT(channel, hhmm = (process.env.CONFIRMED_PRICE_LOCAL_TIME || "18:30"), tz = (process.env.CONFIRMED_PRICE_TZ || "America/Los_Angeles")) {
   const [h, m] = String(hhmm).split(":").map(n => parseInt(n, 10));
-  scheduleDailyInTz("Confirmed Prices Daily", Number.isFinite(h) ? h : 18, Number.isFinite(m) ? m : 30, tz, async () => {
+  scheduleDailyInTz("Confirmed Prices Daily", Number.isFinite(h) ? h : 18, Number.isFinite(m) ? m : 45, tz, async () => {
     try {
       await postConfirmedIfChanged(channel);
     } catch (e) {

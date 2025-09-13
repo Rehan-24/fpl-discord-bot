@@ -14,6 +14,7 @@ const FPL_MUNDO_CHAMP_URL =
 const FPL_MUNDO_PLACEHOLDER_IMAGE =
   process.env.FPL_MUNDO_PLACEHOLDER_IMAGE ||
   "https://fplvideotemplates.com/shop-all/templates/images/Gameweek-Review-Analysis-PPT-230802-1360x765-02.jpg";
+  const HAS_PUPPETEER = !!process.env.USE_PUPPETEER; // set USE_PUPPETEER=1 if you can run headless Chrome
 
 // Tag for this season’s weekly reviews
 const FPL_MUNDO_TAG = "GW-Review-2025/26";
@@ -261,15 +262,112 @@ function extractTitleFromHtml(html) {
 }
 
 async function fetchFplMundoArticle(url) {
-  const { data: html } = await axios.get(url, { timeout: 20000 });
-  const title = extractTitleFromHtml(html);
+  // 1) try plain HTTP with a realistic UA
+  let html;
+  try {
+    const res = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.fplmundo.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+      },
+      transformResponse: [r => r],
+      validateStatus: s => s >= 200 && s < 400,
+    });
+    html = res.data || "";
+  } catch (_) {
+    html = "";
+  }
+
+  const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
+  const looksLikeShell = html.length < 2000 || />\s*Loading\s*<|id="__next"[^>]*>\s*<\/div>/i.test(html);
+
+  // If SSR content isn’t present, try Puppeteer (or Jina fallback)
+  if (looksLikeChallenge || looksLikeShell) {
+    if (HAS_PUPPETEER) {
+      return await fetchFplMundoWithPuppeteer(url);
+    } else {
+      // super light fallback — text-only prerender proxy
+      const proxyUrl = `https://r.jina.ai/http://www.fplmundo.com/${url.split("/").pop()}`;
+      try {
+        const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+        const title = `FPL Mundo League ${url.split("/").pop()}`;
+        const body = String(text || "").trim();
+        if (!body || body.length < 200) throw new Error("empty prerender");
+        const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
+        return { title, excerpt: body.slice(0, 500), markdown };
+      } catch {
+        throw new Error("FPL Mundo page is client-rendered and couldn’t be prerendered.");
+      }
+    }
+  }
+
+  // 2) We *did* get some HTML — extract a title + text (your original logic)
+  const title = extractTitleFromHtml(html) || `FPL Mundo League ${url.split("/").pop()}`;
   const body = htmlToText(html);
-  // Excerpt == body per your instruction
-  const excerpt = body;
-  // Add source link at the end
+  if (!body || body.length < 200) {
+    // even though we got HTML, it still doesn’t contain the article
+    if (HAS_PUPPETEER) return await fetchFplMundoWithPuppeteer(url);
+  }
   const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
-  return { title, excerpt, markdown };
+  return { title, excerpt: body, markdown };
 }
+
+// Headless browser path (clicks consent if present)
+async function fetchFplMundoWithPuppeteer(url) {
+  const puppeteer = require("puppeteer");
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+
+    // try to click cookie/consent buttons if they exist
+    const clickConsent = async () => {
+      const selectors = [
+        'button', 'a[role="button"]', '[id*="accept"]', '[id*="agree"]',
+        '[aria-label*="accept"]', '[data-testid*="accept"]'
+      ];
+      for (const sel of selectors) {
+        const handles = await page.$$(sel);
+        for (const h of handles) {
+          const txt = (await (await h.getProperty("innerText")).jsonValue() || "").toString().trim().toLowerCase();
+          if (/(accept|agree|allow all|got it|ok)/i.test(txt)) {
+            await h.click().catch(()=>{});
+            await page.waitForTimeout(500);
+            return;
+          }
+        }
+      }
+    };
+    await clickConsent().catch(()=>{});
+
+    // wait until meaningful text is present
+    await page.waitForFunction(
+      () => (document.body && document.body.innerText && document.body.innerText.length > 2000),
+      { timeout: 20000 }
+    ).catch(()=>{});
+
+    const title = await page.title().catch(()=>null) || "Review";
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    const body = String(bodyText || "").replace(/\n{3,}/g, "\n\n").trim();
+
+    if (!body || body.length < 200) throw new Error("no article text after render");
+
+    const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
+    return { title, excerpt: body.slice(0, 600), markdown };
+  } finally {
+    await browser.close().catch(()=>{});
+  }
+}
+
 
 // Compute ms until next weekly time in a TZ (Tue=2) using the “offset trick”
 function msUntilNextWeekly(weekday /*0-6*/, hour, minute, tz) {

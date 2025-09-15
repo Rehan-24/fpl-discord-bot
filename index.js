@@ -1035,14 +1035,14 @@ function renderLeagueHtml(league, rawMsg) {
 
 
 function schedulePrevGwSummaryDailyPT(
-  hhmm = (process.env.SUMMARY_POST_LOCAL_TIME || "19:35"),
+  hhmm = (process.env.SUMMARY_POST_LOCAL_TIME || "18:05"),
   tz   = (process.env.SUMMARY_POST_TZ || "America/Los_Angeles")
 ) {
   const [h, m] = String(hhmm).split(":").map(n => parseInt(n, 10));
   scheduleDailyInTz(
     "Prev GW Summary Daily",
-    Number.isFinite(h) ? h : 19,
-    Number.isFinite(m) ? m : 35,
+    Number.isFinite(h) ? h : 18,
+    Number.isFinite(m) ? m : 5,
     tz,
     async () => {
       try {

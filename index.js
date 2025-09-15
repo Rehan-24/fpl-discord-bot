@@ -35,6 +35,13 @@ if (process.env.API_KEY) API_HEADERS["X-Api-Key"] = process.env.API_KEY;
 
 const SITE_BASE = (process.env.SITE_BASE || "https://tfpl.vercel.app").replace(/\/+$/, "");
 
+const PREVIEW_DEBUG = process.env.PREVIEW_DEBUG === "1";
+const PREVIEW_DEBUG_NOTIFY = process.env.PREVIEW_DEBUG_NOTIFY === "1";
+function logPreviewDebug(...args) {
+  if (PREVIEW_DEBUG) console.log("[previews]", ...args);
+}
+
+
 function normalizeUrl(u) {
   if (!u) return u;
   try { new URL(u); return u; } catch (_) { /* not absolute */ }
@@ -1027,6 +1034,27 @@ function renderLeagueHtml(league, rawMsg) {
 }
 
 
+function schedulePrevGwSummaryDailyPT(
+  hhmm = (process.env.SUMMARY_POST_LOCAL_TIME || "19:05"),
+  tz   = (process.env.SUMMARY_POST_TZ || "America/Los_Angeles")
+) {
+  const [h, m] = String(hhmm).split(":").map(n => parseInt(n, 10));
+  scheduleDailyInTz(
+    "Prev GW Summary Daily",
+    Number.isFinite(h) ? h : 19,
+    Number.isFinite(m) ? m : 5,
+    tz,
+    async () => {
+      try {
+        await maybePostPrevGwSummaries(); // picks latest finished GW internally
+      } catch (e) {
+        console.log("summary daily error:", e?.message || e);
+      }
+    }
+  );
+}
+
+
 async function maybePostPrevGwSummaries() {
   if (!REMINDER_CHANNEL_ID) return;
 
@@ -1050,21 +1078,21 @@ async function maybePostPrevGwSummaries() {
   }
 
   const events = bs?.events || [];
+  const now = new Date();
 
-  // latest finished GW
-  const finished = events
-    .filter(e => e.is_finished === true || e.finished === true)
-    .sort((a, b) => b.id - a.id);
+  const upcoming = events
+    .filter(e => e.deadline_time && new Date(e.deadline_time) > now)
+    .sort((a, b) => new Date(a.deadline_time) - new Date(b.deadline_time))[0] || null;
 
-  const prev = finished[0];
-  if (!prev) return;
+  // The target GW is the one immediately before the next deadline.
+  const prevGw = upcoming ? (upcoming.id - 1) : (
+    // fallback to most recent finished if no upcoming found
+    (events.filter(e => e.is_finished || e.finished).sort((a,b)=>b.id-a.id)[0]?.id ?? null)
+  );
+  if (!prevGw || prevGw <= 0) return;
 
-  // Only post when bonus is applied (guard: treat missing property as OK)
-  if (Object.prototype.hasOwnProperty.call(prev, "data_checked") && prev.data_checked === false) {
-    return;
-  }
-
-  const prevGw = prev.id;
+  const prevEvent = events.find(e => e.id === prevGw);
+  if (!prevEvent) return;
   if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
 
   try {
@@ -1115,66 +1143,106 @@ async function scheduleDeadlineReminders() {
     return;
   }
 
-  // Next event (deadline)
-  const ev = await getNextFplEvent();
-  if (!ev) {
-    console.log("No upcoming FPL event found to schedule.");
-    return;
+// Next event (deadline)
+const ev = await getNextFplEvent();
+if (!ev) { console.log("No upcoming FPL event found to schedule."); return; }
+
+const deadline = new Date(ev.deadline_time); // UTC from FPL API
+const oneDayBefore  = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
+const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
+
+clearReminders();
+
+// ---------- helper that actually generates & posts previews ----------
+const runPreviews = async (label) => {
+  logPreviewDebug(`runPreviews start (${label}) for GW${ev.id}`);
+
+  const reasons = [];
+  const previews = [];
+
+  for (const league of LEAGUES) {
+    try {
+      const rows = await fetchLeagueTable(league);
+      const teams = normalizeTeams(rows);
+      if (!teams.length) {
+        logPreviewDebug(`${league}: no league table data`);
+        reasons.push(`${league}: no league table data`);
+        continue;
+      }
+
+      const fixtures = await fetchFixtures(league, ev.id);
+      if (!fixtures?.length) {
+        logPreviewDebug(`${league}: no fixtures for GW${ev.id}`);
+        reasons.push(`${league}: no fixtures`);
+        continue;
+      }
+
+      const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
+      if (!picks.length) {
+        logPreviewDebug(`${league}: no picks generated`);
+        reasons.push(`${league}: no picks`);
+        continue;
+      }
+
+      rememberPreviews(league, ev.id, picks);
+      previews.push(formatPreviewMessage(league, ev.id, picks));
+      logPreviewDebug(`${league}: ok (teams=${teams.length}, fixtures=${fixtures.length}, picks=${picks.length})`);
+    } catch (e) {
+      logPreviewDebug(`${league}: error`, e?.message || e);
+      reasons.push(`${league}: error - ${e?.message || e}`);
+    }
   }
 
-  const deadline = new Date(ev.deadline_time); // UTC from FPL API
-  const oneDayBefore  = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
-  const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
-
-  clearReminders();
-
-  // Generic scheduler with optional callback at fire time
-  const scheduleAt = (when, label, fn) => {
-    const ms = when.getTime() - Date.now();
-    if (ms <= 0) return;
-    const t = setTimeout(async () => {
-      try {
-        const pst = formatInTZ(deadline, "America/Los_Angeles");
-        const est = formatInTZ(deadline, "America/New_York");
-        await channel.send(`🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`);
-        if (typeof fn === "function") await fn();
-      } catch (e) {
-        console.error("Failed to send reminder:", e?.message || e);
-      }
-    }, ms);
-    __scheduledTimeouts.push(t);
-  };
-
-  // Schedule the PREVIEW to post **at** T-24h (not immediately)
-  scheduleAt(oneDayBefore, "24-hour", async () => {
-    try {
-      const previews = [];
-      for (const league of LEAGUES) {
-        const rows = await fetchLeagueTable(league);
-        const teams = normalizeTeams(rows);
-        if (!teams.length) continue;
-        const fixtures = await fetchFixtures(league, ev.id);
-        const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
-        if (!picks.length) continue;
-        rememberPreviews(league, ev.id, picks);
-        previews.push(formatPreviewMessage(league, ev.id, picks));
-      }
-      if (previews.length) {
-        await channel.send(previews.join("\n\n"));
-      }
-    } catch (e) {
-      console.log("Preview generation failed:", e?.message || e);
+  if (previews.length) {
+    await channel.send(previews.join("\n\n"));
+    logPreviewDebug(`posted ${previews.length} preview blocks for GW${ev.id} (${label})`);
+  } else {
+    console.log(`[previews] None generated for GW${ev.id} (${label}). Reasons: ${reasons.join("; ")}`);
+    if (PREVIEW_DEBUG_NOTIFY) {
+      await channel.send(
+        `⚠️ Could not generate GW${ev.id} Ones to Watch (${label}).\n` +
+        reasons.map(r => `• ${r}`).join("\n")
+      ).catch(()=>{});
     }
-  });
+  }
+};
 
-  // Keep the T-1h reminder
-  scheduleAt(oneHourBefore, "1-hour");
+// ---------- schedule the reminders ----------
+const scheduleAt = (when, label, fn) => {
+  const ms = when.getTime() - Date.now();
+  if (ms <= 0) return; // too late to schedule
+  const t = setTimeout(async () => {
+    try {
+      const pst = formatInTZ(deadline, "America/Los_Angeles");
+      const est = formatInTZ(deadline, "America/New_York");
+      await channel.send(`🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`);
+      if (typeof fn === "function") await fn();
+    } catch (e) {
+      console.error("Failed to send reminder:", e?.message || e);
+    }
+  }, ms);
+  __scheduledTimeouts.push(t);
+};
 
-  // After the deadline passes, re-run scheduling to pick up the next GW.
-  const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
-  __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
+// T-24h: schedule if we’re earlier than that mark…
+scheduleAt(oneDayBefore, "24-hour", async () => { await runPreviews("T-24h"); });
 
-  console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
+// …and if we’re already inside the 24h window (common after restarts), run a catch-up once.
+const now = Date.now();
+if (now > oneDayBefore.getTime() && now < oneHourBefore.getTime()) {
+  logPreviewDebug("inside 24h window at (re)schedule time — running catch-up previews now");
+  await runPreviews("catch-up");
+}
+
+// T-1h reminder (unchanged)
+scheduleAt(oneHourBefore, "1-hour");
+
+// re-arm for next GW after this deadline
+const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
+__scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
+
+console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
+
 }
 
 // ===== Price Change Watchers (LiveFPL predicted + confirmed) =====
@@ -1212,7 +1280,7 @@ function schedulePredictedEvery(channel, minutes = 120) {
 }
 
 // Post confirmed changes exactly once each day at 6:30 PM America/Los_Angeles
-function scheduleConfirmedDailyPT(channel, hhmm = (process.env.CONFIRMED_PRICE_LOCAL_TIME || "18:30"), tz = (process.env.CONFIRMED_PRICE_TZ || "America/Los_Angeles")) {
+function scheduleConfirmedDailyPT(channel, hhmm = (process.env.CONFIRMED_PRICE_LOCAL_TIME || "19:25"), tz = (process.env.CONFIRMED_PRICE_TZ || "America/Los_Angeles")) {
   const [h, m] = String(hhmm).split(":").map(n => parseInt(n, 10));
   scheduleDailyInTz("Confirmed Prices Daily", Number.isFinite(h) ? h : 18, Number.isFinite(m) ? m : 45, tz, async () => {
     try {
@@ -1241,10 +1309,8 @@ async function schedulePriceWatchers(client) {
   // Predictions at fixed local times (PST/PDT)
   schedulePredictedFixedTimesPT(channel); // 08:00, 11:00, 15:30, 17:30, 18:00 by default
 
-  // confirmed once per day (keep your existing PT scheduler if you already added it)
-  // If you previously switched to the Pacific-time one I gave you:
   if (typeof scheduleConfirmedDailyPT === "function") {
-    scheduleConfirmedDailyPT(channel); // 18:30 PT by default (can be env-controlled)
+    scheduleConfirmedDailyPT(channel, process.env.CONFIRMED_PRICE_LOCAL_TIME || "19:25"); // 18:30 PT by default (can be env-controlled)
   } else {
     // otherwise your existing UTC-based function will still run
     scheduleConfirmedDaily(channel, CONFIRMED_PRICE_POST_UTC);
@@ -1773,7 +1839,8 @@ async function generateMatchupPreview(league, gameweek) {
 client.once(Events.ClientReady, async (c) => {
   //try { await maybePostPrevGwSummaries(); } catch (_) {}
   //try { setInterval(maybePostPrevGwSummaries, 24*60*60*1000); } catch (_) {}
-  try { setInterval(() => { maybePostPrevGwSummaries().catch(()=>{}); }, 24*60*60*1000); } catch (_) {}
+  //try { setInterval(() => { maybePostPrevGwSummaries().catch(()=>{}); }, 24*60*60*1000); } catch (_) {}
+  try { schedulePrevGwSummaryDailyPT(); } catch (e) { console.log("Summary schedule error:", e?.message || e); }
   try { loadRivalriesSync(); } catch (_) {}
   try { await refreshManagerDiscordMap(); } catch (_) {}
   try { setInterval(refreshManagerDiscordMap, 15*24*60*60*1000); } catch (_) {}

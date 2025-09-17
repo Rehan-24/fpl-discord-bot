@@ -5,6 +5,20 @@ const {
 const axios = require("axios");
 const cheerio = require("cheerio");
 
+// Robust article parsing stack
+let puppeteerExtra = null;
+try {
+  if (HAS_PUPPETEER) {
+    puppeteerExtra = require("puppeteer-extra");
+    puppeteerExtra.use(require("puppeteer-extra-plugin-stealth")());
+  }
+} catch (_) { /* puppeteer optional */ }
+
+const { JSDOM } = require("jsdom");
+const TurndownService = require("turndown");
+const { Readability } = require("@mozilla/readability");
+
+
 
 // ===== FPL Mundo scraping config =====
 const FPL_MUNDO_PREMIER_URL =
@@ -269,111 +283,194 @@ function extractTitleFromHtml(html) {
 }
 
 async function fetchFplMundoArticle(url) {
-  // 1) try plain HTTP with a realistic UA
-  let html;
-  try {
-    const res = await axios.get(url, {
-      timeout: 20000,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.fplmundo.com/",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-      },
-      transformResponse: [r => r],
-      validateStatus: s => s >= 200 && s < 400,
-    });
-    html = res.data || "";
-  } catch (_) {
-    html = "";
+  // 1) try a fully rendered HTML (Puppeteer stealth)
+  let html = "";
+  if (puppeteerExtra) {
+    try {
+      html = await renderWithPuppeteer(url);
+    } catch (_) { /* fall through */ }
   }
 
-  const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
-  const looksLikeShell = html.length < 2000 || />\s*Loading\s*<|id="__next"[^>]*>\s*<\/div>/i.test(html);
+  // 2) try plain HTTP if puppeteer failed or returned nothing useful
+  if (!html || html.length < 2000) {
+    try {
+      const res = await axios.get(url, {
+        timeout: 20000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9"
+        },
+        transformResponse: [r => r],
+        validateStatus: s => s >= 200 && s < 400,
+      });
+      html = res.data || "";
+    } catch (_) { /* fall through */ }
+  }
 
-  // If SSR content isn’t present, try Puppeteer (or Jina fallback)
-  if (looksLikeChallenge || looksLikeShell) {
-    if (HAS_PUPPETEER) {
-      return await fetchFplMundoWithPuppeteer(url);
-    } else {
-      // super light fallback — text-only prerender proxy
+  // 3) as a last resort, use a lightweight prerender proxy (text only)
+  if (!html || html.length < 2000 || /__cf|just a moment|cloudflare/i.test(html)) {
+    try {
       const proxyUrl = `https://r.jina.ai/http://www.fplmundo.com/${url.split("/").pop()}`;
-      try {
-        const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+      const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+      if (String(text || "").trim().length > 500) {
         const title = `FPL Mundo League ${url.split("/").pop()}`;
-        const body = String(text || "").trim();
-        if (!body || body.length < 200) throw new Error("empty prerender");
-        const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
-        return { title, excerpt: body.slice(0, 500), markdown };
-      } catch {
-        throw new Error("FPL Mundo page is client-rendered and couldn’t be prerendered.");
+        return {
+          title,
+          excerpt: String(text).slice(0, 500),
+          markdown: `${text}\n\n[Read the original on FPL Mundo](${url})`,
+          image_url: null,
+        };
       }
-    }
+    } catch (_) { /* give up after this */ }
   }
 
-  // 2) We *did* get some HTML — extract a title + text (your original logic)
-  const title = extractTitleFromHtml(html) || `FPL Mundo League ${url.split("/").pop()}`;
-  const body = htmlToText(html);
-  if (!body || body.length < 200) {
-    // even though we got HTML, it still doesn’t contain the article
-    if (HAS_PUPPETEER) return await fetchFplMundoWithPuppeteer(url);
+  if (!html || html.length < 500) {
+    throw new Error("Could not retrieve meaningful content from FPL Mundo.");
   }
-  const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
-  return { title, excerpt: body, markdown };
+
+  // ---- Parse article with Readability + Turndown ----
+  const { article, og } = parseArticleWithReadability(html, url);
+  const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+
+  // Preserve bold/italics/links/lists, strip scripts/styles
+  td.addRule("keepStrongEm", {
+    filter: ["strong", "b", "em", "i", "a", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6"],
+    replacement: (content) => content,
+  });
+
+  const contentHtml = article?.content || preferArticleSection(html) || "";
+  const markdown = td.turndown(contentHtml).trim();
+  const title = (article?.title || extractTitleFromHtml(html) || "Review").trim();
+  const excerpt = (article?.excerpt || htmlToText(contentHtml).slice(0, 600)).trim();
+
+  // Pick best image: article first image → og:image → placeholder
+  const firstImage = extractFirstImage(contentHtml, url);
+  const image_url = normalizeUrl(firstImage || og?.image || null) || null;
+
+  return {
+    title,
+    excerpt,
+    markdown: `${markdown}\n\n[Read the original on FPL Mundo](${url})`,
+    image_url,
+  };
 }
 
-// Headless browser path (clicks consent if present)
-async function fetchFplMundoWithPuppeteer(url) {
-  const puppeteer = require("puppeteer");
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+/* ---------- helpers used above ---------- */
+
+// Headless render with stealth: click consent if present; wait for content.
+async function renderWithPuppeteer(url) {
+  const browser = await puppeteerExtra.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-features=site-per-process",
+    ],
   });
   try {
     const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // try to click cookie/consent buttons if they exist
-    const clickConsent = async () => {
-      const selectors = [
-        'button', 'a[role="button"]', '[id*="accept"]', '[id*="agree"]',
-        '[aria-label*="accept"]', '[data-testid*="accept"]'
-      ];
-      for (const sel of selectors) {
-        const handles = await page.$$(sel);
-        for (const h of handles) {
-          const txt = (await (await h.getProperty("innerText")).jsonValue() || "").toString().trim().toLowerCase();
-          if (/(accept|agree|allow all|got it|ok)/i.test(txt)) {
-            await h.click().catch(()=>{});
-            await page.waitForTimeout(500);
-            return;
-          }
-        }
-      }
-    };
-    await clickConsent().catch(()=>{});
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    );
 
-    // wait until meaningful text is present
-    await page.waitForFunction(
-      () => (document.body && document.body.innerText && document.body.innerText.length > 2000),
-      { timeout: 20000 }
-    ).catch(()=>{});
+    // block heavy assets for speed (keep images: we want hero URL to exist in DOM)
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const rtype = req.resourceType();
+      if (["stylesheet", "font"].includes(rtype)) return req.abort();
+      req.continue();
+    });
 
-    const title = await page.title().catch(()=>null) || "Review";
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    const body = String(bodyText || "").replace(/\n{3,}/g, "\n\n").trim();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    if (!body || body.length < 200) throw new Error("no article text after render");
+    // consent banner(s)
+    await clickLikelyConsent(page);
 
-    const markdown = `${body}\n\n[Read the original on FPL Mundo](${url})`;
-    return { title, excerpt: body.slice(0, 600), markdown };
+    // wait for something meaningful in the article area
+    await page.waitForFunction(() => {
+      const body = document.body?.innerText || "";
+      const hasText = body.replace(/\s+/g, " ").length > 2000;
+      const hasArticle = !!document.querySelector("article, main");
+      return hasText && hasArticle;
+    }, { timeout: 25000 }).catch(() => {});
+
+    // small settle
+    await page.waitForTimeout(500);
+
+    const html = await page.evaluate(() => document.documentElement.outerHTML);
+    return html || "";
   } finally {
     await browser.close().catch(()=>{});
   }
 }
+
+async function clickLikelyConsent(page) {
+  const selectors = [
+    'button[aria-label*="accept"]',
+    'button:has-text("Accept")',
+    'button:has-text("Agree")',
+    'button:has-text("Allow all")',
+    '[id*="accept"]',
+    '[id*="agree"]',
+    '[data-testid*="accept"]',
+  ];
+  for (const sel of selectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) { await btn.click(); await page.waitForTimeout(300); return; }
+    } catch (_) {}
+  }
+}
+
+// Prefer the <article> or <main> section when Readability fails
+function preferArticleSection(html) {
+  const $ = cheerio.load(html);
+  const $art = $("article").first();
+  if ($art.length) return $art.html() || "";
+  const $main = $("main").first();
+  if ($main.length) return $main.html() || "";
+  return $("body").html() || "";
+}
+
+function parseArticleWithReadability(html, baseUrl) {
+  const dom = new JSDOM(html, { url: baseUrl });
+  const doc = dom.window.document;
+
+  // OG hints
+  const og = {
+    title: doc.querySelector('meta[property="og:title"]')?.content || "",
+    image: absolutize(doc.querySelector('meta[property="og:image"]')?.content || "", baseUrl),
+  };
+
+  // Strip scripts/styles for cleaner parse
+  doc.querySelectorAll("script,style,noscript").forEach(n => n.remove());
+
+  const reader = new Readability(doc, { keepClasses: false });
+  const article = reader.parse(); // {title, content, textContent, excerpt}
+
+  return { article, og };
+}
+
+function absolutize(u, base) {
+  if (!u) return "";
+  try { return new URL(u, base).toString(); } catch { return u; }
+}
+
+function extractFirstImage(html, baseUrl) {
+  try {
+    const $ = cheerio.load(html);
+    const src =
+      $("img[src]").first().attr("src") ||
+      $("source[srcset]").first().attr("srcset")?.split(",")[0]?.trim().split(" ")[0] ||
+      "";
+    return src ? absolutize(src, baseUrl) : "";
+  } catch { return ""; }
+}
+
 
 
 // Compute ms until next weekly time in a TZ (Tue=2) using the “offset trick”
@@ -2043,7 +2140,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch (e) {
         return await interaction.editReply(`❌ ${e?.response?.data?.detail || e.message || "Update failed"}`);
       }
+      
     }
+
+    // /mundo_post — manually fetch & publish a Mundo article for a league
+    if (interaction.commandName === "mundo_post") {
+      await interaction.deferReply({ ephemeral: false });
+
+      const actorId = interaction.user.id;
+
+      // Restrict to mods (same gate you use for publishing)
+      try {
+        ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
+      } catch (e) {
+        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to publish."}`);
+      }
+
+      const league = interaction.options.getString("league", true); // "premier" | "championship"
+      const overrideUrl = interaction.options.getString("url") || null;
+      const overrideImage = interaction.options.getString("image_url") || null;
+      const gwOpt = interaction.options.getInteger("gameweek") || null;
+
+      // Pick default URL by league unless overridden
+      const defaultUrl =
+        league === "premier" ? FPL_MUNDO_PREMIER_URL :
+        league === "championship" ? FPL_MUNDO_CHAMP_URL : null;
+
+      const srcUrl = overrideUrl || defaultUrl;
+      if (!srcUrl) {
+        return await interaction.editReply(
+          `❌ No source URL found. Provide **url** or set FPL_MUNDO_${league.toUpperCase()}_URL in env.`
+        );
+      }
+
+      try {
+        const article = await fetchFplMundoArticle(srcUrl); // { title, excerpt, markdown }
+        const gw = gwOpt ?? (await getLatestFinishedGwNumber());
+        const leagueTitle = league[0].toUpperCase() + league.slice(1);
+        const finalTitle = `GW${gw ?? "?"} Review: ${article.title} (${leagueTitle})`;
+
+        const result = await postNews({
+          title: finalTitle,
+          excerpt: article.excerpt,
+          image_url: overrideImage || FPL_MUNDO_PLACEHOLDER_IMAGE,
+          content_markdown: article.markdown,
+          tags: [FPL_MUNDO_TAG],
+          author: `${interaction.user.tag} (${interaction.user.id})`,
+        });
+
+        const url = `${SITE_BASE}/news/${result.id}`;
+        return await interaction.editReply(`✅ Published **${finalTitle}** — ${url}`);
+      } catch (e) {
+        return await interaction.editReply(`❌ Failed to fetch/post: ${extractError(e)}`);
+      }
+    }
+
 
 
     // Publishing: still restricted to mods (uses ensureCanEditFlexible with dummy target)

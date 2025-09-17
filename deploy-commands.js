@@ -44,6 +44,31 @@ const publishNews = new SlashCommandBuilder()
     o.setName("image_file").setDescription("Or upload an image instead")
   );
 
+  const mundoPost = new SlashCommandBuilder()
+  .setName("mundo_post")
+  .setDescription("Manually publish a FPL Mundo article for a league")
+  .addStringOption(o =>
+    o.setName("league")
+      .setDescription("League to post for")
+      .setRequired(true)
+      .addChoices(
+        { name: "Premier", value: "premier" },
+        { name: "Championship", value: "championship" },
+      )
+  )
+  .addIntegerOption(o =>
+    o.setName("gameweek")
+      .setDescription("Override GW number for the title (optional)")
+  )
+  .addStringOption(o =>
+    o.setName("url")
+      .setDescription("Override the Mundo article URL (optional)")
+  )
+  .addStringOption(o =>
+    o.setName("image_url")
+      .setDescription("Override the article image (optional)")
+  );
+
 // /news_quick — required first, then optional
 const newsQuick = new SlashCommandBuilder()
   .setName("news_quick")
@@ -172,6 +197,7 @@ const commands = [
   matchupPreviews,
   pricePredictions,
   priceChanges,
+  mundoPost,
 ].map(c => c.toJSON());
 
 (async () => {

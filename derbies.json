@@ -12,5 +12,201 @@
     "b_owner": "Ryan Gallagher",
     "label": "A < B",
     "reason": "The B siders have historically had their way in these derbies, will Gal be able to change that?"
-  }
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Imran Khan",
+    "label": "No Love Lost",
+    "reason": "They say sons strive to be like their fathers. However, if Rehan had followed his, he may never have won two titles in FPL. No love lost in this one."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Derek Huddleston",
+    "label": "Barka vs Hala",
+    "reason": "Something of an El Clasico in its own way. The wannabe vs the is."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Hanson Xia",
+    "label": "Anita House Party",
+    "reason": "Title races, bagels, ramen. Two FPL powerhouses who have found little between them before clash once again."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Linden Eberle",
+    "label": "What's a King to a God?",
+    "reason": "Fierce rivals who no know bounds. Disputes over who the FIFA God was as children now leads them to fight over FPL supremacy."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Avi Kumar",
+    "label": "Evolutions",
+    "reason": "Teammates on the pitch but rivals off of it. A game of showmanship. Which brown boy can outdo the other here?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Ryan Gallagher",
+    "label": "A < B",
+    "reason": "The B siders have historically had their way in these derbies, will Gal be able to change that?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "JD Garcia",
+    "label": "Open House",
+    "reason": "Prime real estate available in the other's head."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Rehan Khan",
+    "b_owner": "Chandler Ashman",
+    "label": "Big Brain Ball Knowledge",
+    "reason": "They may not know much about anything else, but they do know what it means to win FPL matches over the other."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Chandler Ashman",
+    "b_owner": "Derek Huddleston",
+    "label": "Lexi Lallas' Lovers",
+    "reason": "Loser gets called Lexi Lallas. We wouldn't wish that on anyone."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Julian Tarazi",
+    "b_owner": "Avi Kumar",
+    "label": "Roommates and Rivals",
+    "reason": "Culver City's own Godzilla vs King Kong type beat. Arguably Michigan's finest involved in this one."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Julian Tarazi",
+    "b_owner": "Hanson Xia",
+    "label": "Historical Risers",
+    "reason": "Both teams entered the FPL world in the same year, both gained promotion in the same year, and both fought it out for the hotly contested 24/25 FPL Title. Who can add another 3 points?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Marvin Ling",
+    "b_owner": "Kamil Sacha",
+    "label": "Mini Leagues to the Big Leagues",
+    "reason": "Kamil and Joel invited Marvin into this world, and then they watched him win a title before they could even react. Time to get a get back."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Marvin Ling",
+    "b_owner": "Joel Mathew",
+    "label": "Mini Leagues to the Big Leagues",
+    "reason": "Kamil and Joel invited Marvin into this world, and then they watched him win a title before they could even react. Time to get a get back."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Marvin Ling",
+    "b_owner": "Aj Pepperney",
+    "label": "Loosely",
+    "reason": "Not sure if there is a rivalry here, but hey. We love starting drama, so."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Tyler Neal",
+    "b_owner": "Tyler Quedens",
+    "label": "Ty-premacy",
+    "reason": "The Battle of the Tyler's rose up from the Championship and now finds itself center stage in the Prem. Who can be the one and only?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Tyler Neal",
+    "b_owner": "Aj Pepperney",
+    "label": "Fuel to the Flame",
+    "reason": "Both teams entered the FPL world in the same year and both gained promotion in the same year. Anyone want to add a chapter to this storied book?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Tyler Quedens",
+    "b_owner": "Aj Pepperney",
+    "label": "Fuel to the Flame",
+    "reason": "Both teams entered the FPL world in the same year and both gained promotion in the same year. Anyone want to add a chapter to this storied book?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Joel Mathew",
+    "b_owner": "Rehan Khan",
+    "label": "Who's Who?",
+    "reason": "Maybe HS teachers who got the two confused and mixed up were onto something, as these two legends of the game continue to perform at the highest level in FPL."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Joel Mathew",
+    "b_owner": "Kamil Sacha",
+    "label": "United Nations",
+    "reason": "Backyard shenanigans and diverse groups mature and grow into fierce FPL matchups!"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Joel Mathew",
+    "b_owner": "Aj Pepperney",
+    "label": "Mini League Rivals and Premier League Pride",
+    "reason": "While this matchup has seen its fair share of drama in certain Mini Leagues, it surely has more in store for the big stage."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Seth Gerus",
+    "b_owner": "Rehan Khan",
+    "label": "F*ck it, CHIPS AWAY",
+    "reason": "I swear, Seth always chips me. PLEASE LET ME BE."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Seth Gerus",
+    "b_owner": "Carter WitmerGautsch",
+    "label": "Mason Men",
+    "reason": "The two men from Mason find themselves fighting it out at the pinnacle of fantasy sports."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Linden Eberle",
+    "b_owner": "Carter WitmerGautsch",
+    "label": "Why He Say F*ck Me For? - 50 Cent & Linden",
+    "reason": "For the love of trash talking. One big head vs another!"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Linden Eberle",
+    "b_owner": "Ryan Gallagher",
+    "label": "All Love",
+    "reason": "Funny guys. Lot's of pride. Must watch fantasy watchup."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Imran Khan",
+    "b_owner": "Ryan Gallagher",
+    "label": "Like A Son",
+    "reason": "Imran has been known to treat Gal like a son. However, that only applies if Gal lets Imran win."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Imran Khan",
+    "b_owner": "Carter WitmerGautsch",
+    "label": "The Son I Always Wanted",
+    "reason": "Imran has been known to think of Carter like a son. However, that only applies if Carter lets Imran win."
+  },
+  {
+    "league": "premier",
+    "a_owner": "Imran Khan",
+    "b_owner": "Linden Eberle",
+    "label": "All Grown Up",
+    "reason": "From road trips and FIFA in the basement to managing in the Premier League. Imran has watched Linden grow through it all. Can he watch him beat him, though?"
+  },
+  {
+    "league": "premier",
+    "a_owner": "Kamil Sacha",
+    "b_owner": "Aj Pepperney",
+    "label": "Mini League Rivals and Premier League Pride=",
+    "reason": "While this matchup has seen its fair share of drama in certain Mini Leagues, it surely has more in store for the big stage."
+  },
 ]

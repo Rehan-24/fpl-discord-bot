@@ -44,30 +44,24 @@ const publishNews = new SlashCommandBuilder()
     o.setName("image_file").setDescription("Or upload an image instead")
   );
 
-  const mundoPost = new SlashCommandBuilder()
-  .setName("mundo_post")
-  .setDescription("Manually publish a FPL Mundo article for a league")
+  const mundoPublish = new SlashCommandBuilder()
+  .setName("mundo_publish")
+  .setDescription("Scrape an FPL Mundo league page and publish each article section")
   .addStringOption(o =>
     o.setName("league")
-      .setDescription("League to post for")
-      .setRequired(true)
-      .addChoices(
-        { name: "Premier", value: "premier" },
-        { name: "Championship", value: "championship" },
-      )
-  )
-  .addIntegerOption(o =>
-    o.setName("gameweek")
-      .setDescription("Override GW number for the title (optional)")
+     .setDescription("premier or championship")
+     .setRequired(true)
+     .addChoices({name:"premier", value:"premier"}, {name:"championship", value:"championship"})
   )
   .addStringOption(o =>
     o.setName("url")
-      .setDescription("Override the Mundo article URL (optional)")
+     .setDescription("Override league page URL (defaults from env)")
   )
-  .addStringOption(o =>
-    o.setName("image_url")
-      .setDescription("Override the article image (optional)")
+  .addBooleanOption(o =>
+    o.setName("dryrun")
+     .setDescription("Preview only (don’t publish)")
   );
+
 
 // /news_quick — required first, then optional
 const newsQuick = new SlashCommandBuilder()
@@ -197,7 +191,7 @@ const commands = [
   matchupPreviews,
   pricePredictions,
   priceChanges,
-  mundoPost,
+  mundoPublish,
 ].map(c => c.toJSON());
 
 (async () => {

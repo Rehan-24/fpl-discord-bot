@@ -282,6 +282,215 @@ function extractTitleFromHtml(html) {
   return "Review";
 }
 
+// ===== Multi-article extraction from a single FPL Mundo page =====
+const MUNDO_MAX_SECTIONS = parseInt(process.env.MUNDO_MAX_SECTIONS || "4", 10);
+const MUNDO_SECTION_MIN_CHARS = parseInt(process.env.MUNDO_SECTION_MIN_CHARS || "600", 10);
+const MUNDO_DEFAULT_IMAGE = process.env.MUNDO_DEFAULT_IMAGE || FPL_MUNDO_PLACEHOLDER_IMAGE;
+
+function absUrl(href, base) {
+  try {
+    if (!href) return null;
+    return new URL(href, base).toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchRenderedHtml(url) {
+  // 1) try plain HTTP (SSR or prerender)
+  try {
+    const res = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.fplmundo.com/",
+      },
+      transformResponse: [r => r],
+      validateStatus: s => s >= 200 && s < 400,
+    });
+    const html = String(res.data || "");
+    const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
+    const looksLikeShell = html.length < 2000 || />\s*Loading\s*<|id="__next"[^>]*>\s*<\/div>/i.test(html);
+    if (!looksLikeChallenge && !looksLikeShell) return html;
+  } catch (_) {}
+
+  // 2) dynamic render w/ Puppeteer
+  if (HAS_PUPPETEER) {
+    const puppeteer = require("puppeteer");
+    const browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    try {
+      const page = await browser.newPage();
+      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+
+      // click common consent buttons if present
+      const candidates = ['button', 'a[role="button"]', '[id*="accept"]', '[id*="agree"]', '[aria-label*="accept"]', '[data-testid*="accept"]'];
+      for (const sel of candidates) {
+        const handles = await page.$$(sel);
+        for (const h of handles) {
+          const txt = (await (await h.getProperty("innerText")).jsonValue() || "").toString().trim().toLowerCase();
+          if (/(accept|agree|allow all|got it|ok)/i.test(txt)) {
+            await h.click().catch(()=>{});
+            await page.waitForTimeout(400);
+            break;
+          }
+        }
+      }
+
+      // let client-render happen
+      await page.waitForFunction(
+        () => document && document.body && document.body.innerText && document.body.innerText.length > 2000,
+        { timeout: 25000 }
+      ).catch(()=>{});
+
+      // scroll to bottom to hydrate lazy content
+      await page.evaluate(async () => {
+        await new Promise(r => {
+          let y = 0;
+          const step = () => {
+            const h = document.documentElement.scrollHeight || document.body.scrollHeight;
+            window.scrollTo(0, Math.min(y += 800, h));
+            if (y >= h) return setTimeout(r, 600);
+            setTimeout(step, 100);
+          };
+          step();
+        });
+      });
+
+      const html = await page.content();
+      return html;
+    } finally {
+      await browser.close().catch(()=>{});
+    }
+  }
+
+  // 3) ultra-light prerender proxy (text only)
+  const proxyUrl = `https://r.jina.ai/http://www.fplmundo.com/${url.split("/").pop()}`;
+  const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+  // wrap plain text in minimal HTML so cheerio can parse it
+  return `<html><body><main>${String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/\n/g,"<br/>")}</main></body></html>`;
+}
+
+/** Turn the full page HTML into multiple section-articles.
+ *  Strategy:
+ *   1) Prefer multiple <article> blocks with headings.
+ *   2) Else split <main> by H2/H3 "section" headings.
+ *   3) Skip tiny/empty sections.
+ */
+function extractSectionsFromHtml(html, pageUrl) {
+  const $ = cheerio.load(html);
+  const root = $("main").length ? $("main").first() : $("body");
+
+  const pickTitle = ($scope) => {
+    const h = $scope.find("h1,h2,h3").first();
+    const t = h.text().trim();
+    return t || "Review";
+  };
+
+  const firstImg = ($scope) => {
+    const img = $scope.find("img[src]").first().attr("src");
+    return absUrl(img, pageUrl) || null;
+  };
+
+  const sections = [];
+
+  // (1) multiple <article> nodes?
+  const $arts = root.find("article");
+  if ($arts.length >= 2) {
+    $arts.each((_, el) => {
+      const $a = $(el);
+      const title = pickTitle($a);
+      const img = firstImg($a) || null;
+      const htmlBlock = $.html($a);
+      const text = htmlToText(htmlBlock);
+      if (text && text.length >= MUNDO_SECTION_MIN_CHARS) {
+        sections.push({
+          title,
+          excerpt: text.slice(0, 600),
+          image_url: img || MUNDO_DEFAULT_IMAGE,
+          content_markdown: `${text}\n\n[Read the original on FPL Mundo](${pageUrl})`,
+        });
+      }
+    });
+  }
+
+  // (2) If not enough, split by H2/H3 headings under main
+  if (sections.length < 2) {
+    const headers = root.find("h2,h3").toArray();
+    for (let i = 0; i < headers.length; i++) {
+      const start = headers[i];
+      const end = headers.slice(i + 1).find(h => h.tagName.toLowerCase() <= start.tagName.toLowerCase());
+      // collect siblings from start->(before next header)
+      let htmlBlock = "";
+      let n = start;
+      while (n && n !== end) {
+        htmlBlock += $.html(n);
+        n = n.nextSibling;
+      }
+      const section$ = cheerio.load(`<div>${htmlBlock}</div>`)("div");
+      const title = $(start).text().trim() || "Review";
+      const img = firstImg(section$) || firstImg(root) || null;
+      const text = htmlToText(htmlBlock);
+      if (text && text.length >= MUNDO_SECTION_MIN_CHARS) {
+        sections.push({
+          title,
+          excerpt: text.slice(0, 600),
+          image_url: img || MUNDO_DEFAULT_IMAGE,
+          content_markdown: `${text}\n\n[Read the original on FPL Mundo](${pageUrl})`,
+        });
+      }
+      if (sections.length >= MUNDO_MAX_SECTIONS) break;
+    }
+  }
+
+  // (3) Fallback: treat the whole page as one
+  if (!sections.length) {
+    const bigText = htmlToText($.html(root));
+    if (bigText && bigText.length >= 300) {
+      const title = extractTitleFromHtml(html) || "Review";
+      sections.push({
+        title,
+        excerpt: bigText.slice(0, 600),
+        image_url: firstImg(root) || MUNDO_DEFAULT_IMAGE,
+        content_markdown: `${bigText}\n\n[Read the original on FPL Mundo](${pageUrl})`,
+      });
+    }
+  }
+
+  // Trim to max N
+  return sections.slice(0, MUNDO_MAX_SECTIONS);
+}
+
+async function publishFplMundoMulti(url, { tag = FPL_MUNDO_TAG, imageFallback = FPL_MUNDO_PLACEHOLDER_IMAGE } = {}) {
+  const html = await fetchRenderedHtml(url);
+  const sections = extractSectionsFromHtml(html, url);
+
+  const results = [];
+  for (const sec of sections) {
+    const payload = {
+      title: sec.title,
+      excerpt: sec.excerpt || "",
+      image_url: sec.image_url || imageFallback,
+      content_markdown: sec.content_markdown,
+      tags: Array.isArray(tag) ? tag : [tag],
+      author: "FPL Mundo",
+    };
+    try {
+      const posted = await postNews(payload);
+      results.push({ ok: true, id: posted.id, title: payload.title });
+    } catch (e) {
+      results.push({ ok: false, error: extractError(e), title: payload.title });
+    }
+  }
+  return { sections, results };
+}
+
+
 async function fetchFplMundoArticle(url) {
   // 1) try a fully rendered HTML (Puppeteer stealth)
   let html = "";
@@ -2143,57 +2352,53 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
     }
 
-    // /mundo_post — manually fetch & publish a Mundo article for a league
-    if (interaction.commandName === "mundo_post") {
-      await interaction.deferReply({ ephemeral: false });
+    if (interaction.commandName === "mundo_publish") {
+  await interaction.deferReply({ ephemeral: false });
+  const actorId = interaction.user.id;
 
-      const actorId = interaction.user.id;
+  // Require mod (re-use your flexible check)
+  try {
+    ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
+  } catch (e) {
+    return interaction.editReply(`❌ ${e.message || "You don’t have permission to publish."}`);
+  }
 
-      // Restrict to mods (same gate you use for publishing)
-      try {
-        ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
-      } catch (e) {
-        return await interaction.editReply(`❌ ${e.message || "You don’t have permission to publish."}`);
-      }
+  const league = interaction.options.getString("league", true);
+  const overrideUrl = interaction.options.getString("url") || null;
+  const dryrun = !!interaction.options.getBoolean("dryrun");
 
-      const league = interaction.options.getString("league", true); // "premier" | "championship"
-      const overrideUrl = interaction.options.getString("url") || null;
-      const overrideImage = interaction.options.getString("image_url") || null;
-      const gwOpt = interaction.options.getInteger("gameweek") || null;
+  const leagueUrl = overrideUrl ||
+    (league === "premier" ? FPL_MUNDO_PREMIER_URL : FPL_MUNDO_CHAMP_URL);
 
-      // Pick default URL by league unless overridden
-      const defaultUrl =
-        league === "premier" ? FPL_MUNDO_PREMIER_URL :
-        league === "championship" ? FPL_MUNDO_CHAMP_URL : null;
+  try {
+    const { sections, results } = await publishFplMundoMulti(leagueUrl, {
+      tag: FPL_MUNDO_TAG,
+      imageFallback: FPL_MUNDO_PLACEHOLDER_IMAGE,
+    });
 
-      const srcUrl = overrideUrl || defaultUrl;
-      if (!srcUrl) {
-        return await interaction.editReply(
-          `❌ No source URL found. Provide **url** or set FPL_MUNDO_${league.toUpperCase()}_URL in env.`
-        );
-      }
-
-      try {
-        const article = await fetchFplMundoArticle(srcUrl); // { title, excerpt, markdown }
-        const gw = gwOpt ?? (await getLatestFinishedGwNumber());
-        const leagueTitle = league[0].toUpperCase() + league.slice(1);
-        const finalTitle = `GW${gw ?? "?"} Review: ${article.title} (${leagueTitle})`;
-
-        const result = await postNews({
-          title: finalTitle,
-          excerpt: article.excerpt,
-          image_url: overrideImage || FPL_MUNDO_PLACEHOLDER_IMAGE,
-          content_markdown: article.markdown,
-          tags: [FPL_MUNDO_TAG],
-          author: `${interaction.user.tag} (${interaction.user.id})`,
-        });
-
-        const url = `${SITE_BASE}/news/${result.id}`;
-        return await interaction.editReply(`✅ Published **${finalTitle}** — ${url}`);
-      } catch (e) {
-        return await interaction.editReply(`❌ Failed to fetch/post: ${extractError(e)}`);
-      }
+    if (!sections.length) {
+      return interaction.editReply(`⚠️ I couldn’t find distinct article sections on that page.`);
     }
+
+    if (dryrun) {
+      const titles = sections.map((s,i)=>`• ${i+1}. ${s.title}`).join("\n");
+      return interaction.editReply(`📝 **Preview only** — found ${sections.length} sections on ${league} page:\n${titles}`);
+    }
+
+    // summarize published
+    const ok = results.filter(r => r.ok);
+    const fail = results.filter(r => !r.ok);
+    let msg = `✅ Published ${ok.length}/${sections.length} section(s) from the ${league} page.`;
+    if (ok.length) msg += `\nPosted:\n${ok.map(o=>`• ${o.title} (id: ${o.id})`).join("\n")}`;
+    if (fail.length) msg += `\n\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}`;
+    return interaction.editReply(msg);
+
+  } catch (e) {
+    console.error("mundo_publish error:", e);
+    return interaction.editReply(`❌ Failed to process that page: ${e?.message || e}`);
+  }
+}
+
 
 
 

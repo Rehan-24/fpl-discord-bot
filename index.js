@@ -40,6 +40,18 @@ const WEEKLY_REVIEW_IMAGE =
 const WEEKLY_REVIEW_TAG =
   process.env.WEEKLY_REVIEW_TAG || "GW-Review-2025/26";
 
+// Require the GW to be both finished AND data_checked before posting summaries.
+// Set GW_SUMMARY_REQUIRE_FINALIZED=0 to relax to "finished only".
+const GW_SUMMARY_REQUIRE_FINALIZED = process.env.GW_SUMMARY_REQUIRE_FINALIZED !== "0";
+
+function isEventFinalized(ev) {
+  if (!ev) return false;
+  const finished = ev.is_finished === true || ev.finished === true;
+  const checked  = ev.data_checked === true;
+  return finished && (GW_SUMMARY_REQUIRE_FINALIZED ? checked : true);
+}
+
+
 
 // ===== CONFIG =====
 const BASE = "https://tfpl.onrender.com/api".replace(/\/+$/, "");
@@ -1399,6 +1411,16 @@ async function maybePostPrevGwSummaries() {
 
   const prevEvent = events.find(e => e.id === prevGw);
   if (!prevEvent) return;
+
+  // don't post until the GW is actually finished (and data checked if required)
+  if (!isEventFinalized(prevEvent)) {
+    console.log(
+      `Prev GW ${prevGw} not finalized yet — ` +
+      `finished=${prevEvent.finished ?? prevEvent.is_finished}, data_checked=${prevEvent.data_checked}. Skipping.`
+    );
+    return;
+  }
+
   if (__LAST_SUMMARY_POSTED_GW === prevGw) return;
 
   try {
@@ -1406,6 +1428,13 @@ async function maybePostPrevGwSummaries() {
     const leagueMsgs = [];
     for (const league of LEAGUES) {
       const sum = await summarizePreviousGW(league, prevGw);
+      // make sure there are scores
+      const enough =
+        sum && Array.isArray(sum.chosen) && sum.chosen.length >= 1; // chosen comes from fixtures with points
+      if (!enough) {
+        console.log(`GW${prevGw} summary looked incomplete — skipping for now.`);
+        return;
+      }
       const msg = formatPrevGwSummaryMessage(league, prevGw, sum);
       await channel.send(msg);
       leagueMsgs.push({ league, msg });

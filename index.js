@@ -4,6 +4,27 @@ const {
 } = require("discord.js");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const { JSDOM } = require("jsdom");
+const TurndownService = require("turndown");
+const { Readability } = require("@mozilla/readability");
+
+
+
+// ===== FPL Mundo scraping config =====
+// --- DEBUG ---
+const DEBUG_MUNDO = String(process.env.DEBUG_MUNDO || "").trim() !== "" && process.env.DEBUG_MUNDO !== "0";
+function debugLog(...args) {
+  if (DEBUG_MUNDO) console.log("[MUNDO]", ...args);
+}
+
+const FPL_MUNDO_PREMIER_URL =
+  process.env.FPL_MUNDO_PREMIER_URL || "https://www.fplmundo.com/723566";
+const FPL_MUNDO_CHAMP_URL =
+  process.env.FPL_MUNDO_CHAMP_URL || "https://www.fplmundo.com/850022";
+const FPL_MUNDO_PLACEHOLDER_IMAGE =
+  process.env.FPL_MUNDO_PLACEHOLDER_IMAGE ||
+  "https://fplvideotemplates.com/shop-all/templates/images/Gameweek-Review-Analysis-PPT-230802-1360x765-02.jpg";
+const HAS_PUPPETEER = !!process.env.USE_PUPPETEER; // set USE_PUPPETEER=1 if you can run headless Chrome
 
 // Robust article parsing stack
 let puppeteerExtra = null;
@@ -13,22 +34,6 @@ try {
     puppeteerExtra.use(require("puppeteer-extra-plugin-stealth")());
   }
 } catch (_) { /* puppeteer optional */ }
-
-const { JSDOM } = require("jsdom");
-const TurndownService = require("turndown");
-const { Readability } = require("@mozilla/readability");
-
-
-
-// ===== FPL Mundo scraping config =====
-const FPL_MUNDO_PREMIER_URL =
-  process.env.FPL_MUNDO_PREMIER_URL || "https://www.fplmundo.com/723566";
-const FPL_MUNDO_CHAMP_URL =
-  process.env.FPL_MUNDO_CHAMP_URL || "https://www.fplmundo.com/850022";
-const FPL_MUNDO_PLACEHOLDER_IMAGE =
-  process.env.FPL_MUNDO_PLACEHOLDER_IMAGE ||
-  "https://fplvideotemplates.com/shop-all/templates/images/Gameweek-Review-Analysis-PPT-230802-1360x765-02.jpg";
-  const HAS_PUPPETEER = !!process.env.USE_PUPPETEER; // set USE_PUPPETEER=1 if you can run headless Chrome
 
 // Tag for this season’s weekly reviews
 const FPL_MUNDO_TAG = "GW-Review-2025/26";
@@ -51,7 +56,17 @@ function isEventFinalized(ev) {
   return finished && (GW_SUMMARY_REQUIRE_FINALIZED ? checked : true);
 }
 
-
+async function safeDefer(interaction, opts = { ephemeral: false }) {
+  try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply(opts);
+    }
+  } catch {
+    try { if (!interaction.deferred && !interaction.replied) {
+      await interaction.reply({ content: "Working on it…", ephemeral: true });
+    }} catch {}
+  }
+}
 
 // ===== CONFIG =====
 const BASE = "https://tfpl.onrender.com/api".replace(/\/+$/, "");
@@ -309,6 +324,8 @@ function absUrl(href, base) {
 }
 
 async function fetchRenderedHtml(url) {
+  debugLog("fetchRenderedHtml:start", url);
+
   // 1) try plain HTTP (SSR or prerender)
   try {
     const res = await axios.get(url, {
@@ -325,11 +342,15 @@ async function fetchRenderedHtml(url) {
     const html = String(res.data || "");
     const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
     const looksLikeShell = html.length < 2000 || />\s*Loading\s*<|id="__next"[^>]*>\s*<\/div>/i.test(html);
+    debugLog("fetchRenderedHtml:plain", { len: html.length, looksLikeChallenge, looksLikeShell });
     if (!looksLikeChallenge && !looksLikeShell) return html;
-  } catch (_) {}
+  } catch (e) {
+    debugLog("fetchRenderedHtml:plain:error", e?.message || e);
+  }
 
   // 2) dynamic render w/ Puppeteer
   if (HAS_PUPPETEER) {
+    debugLog("fetchRenderedHtml:puppeteer:enabled");
     const puppeteer = require("puppeteer");
     const browser = await puppeteer.launch({
       headless: "new",
@@ -339,14 +360,15 @@ async function fetchRenderedHtml(url) {
       const page = await browser.newPage();
       await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
       await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+      debugLog("fetchRenderedHtml:puppeteer:navigated");
 
-      // click common consent buttons if present
       const candidates = ['button', 'a[role="button"]', '[id*="accept"]', '[id*="agree"]', '[aria-label*="accept"]', '[data-testid*="accept"]'];
       for (const sel of candidates) {
         const handles = await page.$$(sel);
         for (const h of handles) {
           const txt = (await (await h.getProperty("innerText")).jsonValue() || "").toString().trim().toLowerCase();
           if (/(accept|agree|allow all|got it|ok)/i.test(txt)) {
+            debugLog("fetchRenderedHtml:puppeteer:clickedConsent", txt);
             await h.click().catch(()=>{});
             await page.waitForTimeout(400);
             break;
@@ -354,37 +376,30 @@ async function fetchRenderedHtml(url) {
         }
       }
 
-      // let client-render happen
       await page.waitForFunction(
         () => document && document.body && document.body.innerText && document.body.innerText.length > 2000,
         { timeout: 25000 }
-      ).catch(()=>{});
-
-      // scroll to bottom to hydrate lazy content
-      await page.evaluate(async () => {
-        await new Promise(r => {
-          let y = 0;
-          const step = () => {
-            const h = document.documentElement.scrollHeight || document.body.scrollHeight;
-            window.scrollTo(0, Math.min(y += 800, h));
-            if (y >= h) return setTimeout(r, 600);
-            setTimeout(step, 100);
-          };
-          step();
-        });
-      });
+      ).catch(()=>{ debugLog("fetchRenderedHtml:puppeteer:waitForFunction:timeout"); });
 
       const html = await page.content();
+      debugLog("fetchRenderedHtml:puppeteer:return", { len: html?.length || 0 });
       return html;
+    } catch (e) {
+      debugLog("fetchRenderedHtml:puppeteer:error", e?.message || e);
     } finally {
       await browser.close().catch(()=>{});
     }
+  } else {
+    debugLog("fetchRenderedHtml:puppeteer:disabled");
   }
 
   // 3) ultra-light prerender proxy (text only)
-  const proxyUrl = `https://r.jina.ai/http://www.fplmundo.com/${url.split("/").pop()}`;
+  const proxyUrl = `https://r.jina.ai/https://www.fplmundo.com/${url.split("/").pop()}`;
+  debugLog("fetchRenderedHtml:proxy", proxyUrl);
+
   const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
-  // wrap plain text in minimal HTML so cheerio can parse it
+  debugLog("fetchRenderedHtml:proxy:return", { len: String(text || "").length });
+
   return `<html><body><main>${String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/\n/g,"<br/>")}</main></body></html>`;
 }
 
@@ -432,33 +447,44 @@ function extractSectionsFromHtml(html, pageUrl) {
   }
 
   // (2) If not enough, split by H2/H3 headings under main
-  if (sections.length < 2) {
-    const headers = root.find("h2,h3").toArray();
-    for (let i = 0; i < headers.length; i++) {
-      const start = headers[i];
-      const end = headers.slice(i + 1).find(h => h.tagName.toLowerCase() <= start.tagName.toLowerCase());
-      // collect siblings from start->(before next header)
-      let htmlBlock = "";
-      let n = start;
-      while (n && n !== end) {
-        htmlBlock += $.html(n);
-        n = n.nextSibling;
-      }
-      const section$ = cheerio.load(`<div>${htmlBlock}</div>`)("div");
-      const title = $(start).text().trim() || "Review";
-      const img = firstImg(section$) || firstImg(root) || null;
-      const text = htmlToText(htmlBlock);
-      if (text && text.length >= MUNDO_SECTION_MIN_CHARS) {
-        sections.push({
-          title,
-          excerpt: text.slice(0, 600),
-          image_url: img || MUNDO_DEFAULT_IMAGE,
-          content_markdown: `${text}\n\n[Read the original on FPL Mundo](${pageUrl})`,
-        });
-      }
-      if (sections.length >= MUNDO_MAX_SECTIONS) break;
+if (sections.length < 2) {
+  const headers = root.find("h2,h3").toArray();
+
+  const level = (el) => {
+    const tag = (el.tagName || "").toLowerCase();
+    return tag === "h2" ? 2 : tag === "h3" ? 3 : 9;
+  };
+
+  for (let i = 0; i < headers.length; i++) {
+    const start = headers[i];
+    const startLevel = level(start);
+
+    // Collect nodes from start until the next header of same or higher level
+    let htmlBlock = $.html(start);
+    let n = start.next;
+    while (n) {
+      if (n.type === "tag" && /^(h2|h3)$/i.test(n.tagName) && level(n) <= startLevel) break;
+      htmlBlock += $.html(n);
+      n = n.next;
     }
+
+    const section$ = cheerio.load(`<div>${htmlBlock}</div>`)("div");
+    const title = section$.find("h2,h3").first().text().trim() || "Review";
+    const img = firstImg(section$) || firstImg(root) || null;
+    const text = htmlToText(htmlBlock);
+
+    if (text && text.length >= MUNDO_SECTION_MIN_CHARS) {
+      sections.push({
+        title,
+        excerpt: text.slice(0, 600),
+        image_url: img || MUNDO_DEFAULT_IMAGE,
+        content_markdown: `${text}\n\n[Read the original on FPL Mundo](${pageUrl})`,
+      });
+    }
+    if (sections.length >= MUNDO_MAX_SECTIONS) break;
   }
+}
+
 
   // (3) Fallback: treat the whole page as one
   if (!sections.length) {
@@ -532,7 +558,7 @@ async function fetchFplMundoArticle(url) {
   // 3) as a last resort, use a lightweight prerender proxy (text only)
   if (!html || html.length < 2000 || /__cf|just a moment|cloudflare/i.test(html)) {
     try {
-      const proxyUrl = `https://r.jina.ai/http://www.fplmundo.com/${url.split("/").pop()}`;
+      const proxyUrl = `https://r.jina.ai/https://www.fplmundo.com/${url.split("/").pop()}`;
       const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
       if (String(text || "").trim().length > 500) {
         const title = `FPL Mundo League ${url.split("/").pop()}`;
@@ -862,6 +888,180 @@ async function postWeeklyFplMundoArticles() {
   console.log("FPL Mundo weekly posts completed.");
 }
 
+// Config for list mode
+const MUNDO_MAX_LINKS = parseInt(process.env.MUNDO_MAX_LINKS || "4", 10);
+
+// Pick likely post/article links from the league hub page
+function extractPostLinksFromLeaguePage(html, baseUrl) {
+  const $ = cheerio.load(html);
+  const base = new URL(baseUrl);
+  const seen = new Set();
+  const out = [];
+
+  // Prefer anchors in “contenty” areas first
+  const candidates = [
+    'main a[href]',
+    'article a[href]',
+    '.card a[href]',
+    'section a[href]',
+    'h1 a[href], h2 a[href], h3 a[href]'
+  ].join(',');
+
+  $(candidates).each((_, a) => {
+    const raw = ($(a).attr('href') || '').trim();
+    if (!looksLikeArticleLink(raw)) return;
+
+    const url = absUrl(raw, baseUrl);
+    if (!url) return;
+
+    let u;
+    try { u = new URL(url); } catch { return; }
+
+    // Skip exact self and pure-hash
+    const isSelf = u.href.replace(/\/+$/, '') === baseUrl.replace(/\/+$/, '');
+    if (isSelf) return;
+    if (u.hash && !u.pathname.replace(/\/+$/, '')) return;
+
+    // Deduplicate by origin+path (strip trailing slash)
+    const key = (u.origin + u.pathname).replace(/\/+$/, '');
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    // Heuristic score: posts/reviews/GW, numbers in path/text, etc.
+    const text = ($(a).text() || $(a).attr('aria-label') || '').trim();
+    const score =
+      (/post|article|review|gw|gameweek|preview|recap|results/i.test(u.pathname) ? 5 : 0) +
+      (/\d{2,4}/.test(u.pathname) || /\bGW\s*\d+\b/i.test(text) ? 2 : 0) +
+      (/(read more|share story)/i.test(text) ? 1 : 0);
+
+    const title =
+      text ||
+      $(a).closest('article, .card, section').find('h1,h2,h3').first().text().trim() ||
+      u.hostname;
+
+    out.push({ url: u.toString(), title, score });
+  });
+
+  // Fallback: if none matched, scan all anchors with the same heuristics
+  if (!out.length) {
+    $('a[href]').each((_, a) => {
+      const raw = ($(a).attr('href') || '').trim();
+      if (!looksLikeArticleLink(raw)) return;
+      const url = absUrl(raw, baseUrl);
+      if (!url) return;
+      let u; try { u = new URL(url); } catch { return; }
+
+      const isSelf = u.href.replace(/\/+$/, '') === baseUrl.replace(/\/+$/, '');
+      if (isSelf) return;
+      if (u.hash && !u.pathname.replace(/\/+$/, '')) return;
+
+      const key = (u.origin + u.pathname).replace(/\/+$/, '');
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      const text = ($(a).text() || $(a).attr('aria-label') || '').trim();
+      const score =
+        (/post|article|review|gw|gameweek|preview|recap|results/i.test(u.pathname) ? 5 : 0) +
+        (/\d{2,4}/.test(u.pathname) || /\bGW\s*\d+\b/i.test(text) ? 2 : 0);
+
+      out.push({ url: u.toString(), title: text || u.hostname, score });
+    });
+  }
+
+  // Sort by score (desc), keep DOM order as tiebreaker via original index
+  const scored = out.map((o, i) => ({ ...o, i })).sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.i - b.i;
+  });
+
+  const top = scored.slice(0, MUNDO_MAX_LINKS).map(({ url, title }) => ({ url, title }));
+  if (top.length) return top;
+
+  // 🔧 Regex fallback (works on Jina text proxy output)
+  debugLog("extractPostLinksFromLeaguePage: regex fallback");
+  const htmlStr = String($.root().html() || "");
+  //const base = new URL(baseUrl);
+
+  const out1 = new Set();
+
+  // Absolute like https://www.fplmundo.com/723566
+  for (const m of htmlStr.matchAll(/https?:\/\/(?:www\.)?fplmundo\.com\/(\d{5,9})(?!\d)/gi)) {
+    out1.add(`${base.origin}/${m[1]}`);
+    if (out1.size >= MUNDO_MAX_LINKS) break;
+  }
+
+  // Relative like /723566
+  if (out1.size < MUNDO_MAX_LINKS) {
+    for (const m of htmlStr.matchAll(/(^|[^a-z0-9/_-])\/(\d{5,9})(?!\d)/gi)) {
+      out1.add(`${base.origin}/${m[2]}`);
+      if (out1.size >= MUNDO_MAX_LINKS) break;
+    }
+  }
+
+  const final = Array.from(out1).slice(0, MUNDO_MAX_LINKS).map(u => ({ url: u, title: u }));
+  debugLog("extractPostLinksFromLeaguePage:return:regex", final);
+  return final;
+
+  // // Return the top N (env: MUNDO_MAX_LINKS, default 4)
+  // return scored.slice(0, MUNDO_MAX_LINKS).map(({ url, title }) => ({ url, title }));
+}
+
+
+// Open the league page, extract post links, fetch each post, and publish
+async function publishFplMundoFromList(leagueUrl, {
+  tag = FPL_MUNDO_TAG,
+  imageFallback = FPL_MUNDO_PLACEHOLDER_IMAGE,
+  max = MUNDO_MAX_LINKS,
+  dryrun = false,
+} = {}) {
+  const html = await fetchRenderedHtml(leagueUrl);
+  let links = extractPostLinksFromLeaguePage(html, leagueUrl).slice(0, max);
+
+  // 🔧 Fallback: if the page came from the text proxy (no anchors), reuse our regex collector
+  if (!links.length) {
+    debugLog("publishFplMundoFromList: no anchors → trying regex fallback");
+    const regexLinks = collectMundoArticleLinks(html, leagueUrl, max) || [];
+    links = regexLinks.map(u => ({ url: u, title: u })); // adapt to the shape we expect
+  }
+
+  if (!links.length) {
+    debugLog("publishFplMundoFromList: still no links after fallback");
+    return { links: [], results: [], reason: "no-links" };
+  }
+
+
+  const results = [];
+  for (const { url } of links) {
+    try {
+      const art = await fetchFplMundoArticle(url); // uses Readability+Turndown
+      if (!art?.markdown || art.markdown.length < 300) {
+        results.push({ ok: false, title: art?.title || url, error: "too-short-or-empty" });
+        continue;
+      }
+      if (dryrun) {
+        results.push({ ok: true, title: art.title, id: null, dryrun: true });
+        continue;
+      }
+      const posted = await postNews({
+        title: art.title,
+        excerpt: art.excerpt || "",
+        image_url: art.image_url || imageFallback,
+        content_markdown: art.markdown,
+        tags: [tag],
+        author: "FPL Mundo",
+      });
+      results.push({ ok: true, id: posted.id, title: art.title });
+      // polite tiny pause (Cloudflare friendliness)
+      await new Promise(r => setTimeout(r, 300));
+    } catch (e) {
+      results.push({ ok: false, title: url, error: extractError(e) });
+    }
+  }
+
+  return { links, results };
+}
+
+
 // Public function to kick off our weekly schedule (Tue 7:00 AM PT)
 function scheduleWeeklyFplMundoPosts() {
   // Tuesday = 2
@@ -945,7 +1145,9 @@ async function fetchLeagueTable(league) {
   const urls = [];
   if (process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]) {
     urls.push(process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]);
+    console.log("inside if - ", process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]);
   }
+  console.log("after if - ", urls);
   // Try backend then site fallbacks
   urls.push(
     `${BASE}/standings?league=${league}`,     // <-- NEW: your FastAPI route
@@ -953,6 +1155,7 @@ async function fetchLeagueTable(league) {
     `${BASE}/${league}`,
     `${SITE_BASE}/api/${league}`
   );
+  console.log("outside if - ", urls);
   for (const u of urls) {
     try {
       const { data } = await axios.get(u);
@@ -963,6 +1166,7 @@ async function fetchLeagueTable(league) {
         Array.isArray(data?.rows) ? data.rows :
         Array.isArray(data?.data?.rows) ? data.data.rows :
         (data?.teams || data?.table || []);
+      console.log("arr - ", arr);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
       /* try next */
@@ -1462,6 +1666,194 @@ async function maybePostPrevGwSummaries() {
     console.log("maybePostPrevGwSummaries: posting failed", e?.message || e);
   }
 }
+
+function unique(arr) { return [...new Set(arr)]; }
+function looksLikeArticleLink(href) {
+  if (!href) return false;
+  const s = String(href).trim();
+
+  // Keep absolute http(s) or site-relative; drop everything else
+  if (!/^https?:|^\//i.test(s)) return false;
+
+  // Skip anchors / non-content schemes
+  if (s === "#" || /^#/.test(s)) return false;
+  if (/^mailto:|^tel:/i.test(s)) return false;
+
+  // Skip obvious non-articles: media files and common social sites
+  if (/\.(jpg|jpeg|png|gif|webp|svg|avif|mp4|mov|webm|pdf)(\?.*)?$/i.test(s)) return false;
+  if (/twitter\.com|x\.com|facebook\.com|linkedin\.com|whatsapp\.com|t\.me|instagram\.com|pinterest\.com|reddit\.com/i.test(s)) return false;
+
+  // Skip auth/policy pages
+  if (/\b(login|sign[- ]?in|signup|register|privacy|terms|cookies|policy)\b/i.test(s)) return false;
+
+  return true;
+}
+
+function collectMundoArticleLinks(html, baseUrl, max = 4) {
+  const $ = cheerio.load(html);
+  const root = $("main").length ? $("main") : $("body");
+
+  const candidates = [];
+  root.find("a[href]").each((_, a) => {
+    const rawHref = ($(a).attr("href") || "").trim();
+    const href = absUrl(rawHref, baseUrl);
+    const text = ($(a).text() || "").trim();
+    const ok = looksLikeArticleLink(href);
+    if (!ok) return;
+
+    if (!href || href === baseUrl || /^#/.test(href)) return;
+
+    const score =
+      (/(gw|gameweek|review|results|round|match)/i.test(text) ? 5 : 0) +
+      (/\d{2,4}/.test(text) ? 2 : 0) +
+      (/(post|article)/i.test(text) ? 1 : 0);
+
+    candidates.push({ href, text, score });
+  });
+
+  debugLog("collectMundoArticleLinks:anchors", { count: candidates.length });
+
+  // dump first few for sanity
+  candidates.slice(0, 10).forEach((c, i) => {
+    debugLog(`anchor[${i}]`, { href: c.href, text: c.text.slice(0, 80), score: c.score });
+  });
+
+  // Dedup + top-N
+  const seen = new Set();
+  const deduped = [];
+  for (const c of candidates) {
+    if (seen.has(c.href)) continue;
+    seen.add(c.href);
+    deduped.push(c);
+  }
+  deduped.sort((a, b) => b.score - a.score);
+
+  let links = unique(deduped.map(x => x.href)).slice(0, max);
+  if (links.length) {
+    debugLog("collectMundoArticleLinks:return:anchors", links);
+    return links;
+  }
+
+  // Regex fallback
+  debugLog("collectMundoArticleLinks:fallback:regex");
+  const base = new URL(baseUrl);
+  const out = new Set();
+  const htmlStr = String(html || "");
+
+  // Absolute URLs
+  for (const m of htmlStr.matchAll(/https?:\/\/(?:www\.)?fplmundo\.com\/(\d{5,9})(?!\d)/gi)) {
+    out.add(`https://www.fplmundo.com/${m[1]}`);
+    if (out.size >= max) break;
+  }
+
+  // Relative numeric links
+  if (out.size < max) {
+    for (const m of htmlStr.matchAll(/(^|[^a-z0-9/_-])\/(\d{5,9})(?!\d)/gi)) {
+      out.add(`${base.origin}/${m[2]}`);
+      if (out.size >= max) break;
+    }
+  }
+
+  // Plain bare IDs
+  if (out.size < max) {
+    for (const m of htmlStr.matchAll(/\b(\d{5,9})\b/g)) {
+      out.add(`${base.origin}/${m[1]}`);
+      if (out.size >= max) break;
+    }
+  }
+
+  const final = Array.from(out).slice(0, max);
+  debugLog("collectMundoArticleLinks:return:regex", final);
+  return final;
+}
+
+
+
+async function publishFromMundoPage(url, { mode="auto", max=4, tag=FPL_MUNDO_TAG, imageFallback=FPL_MUNDO_PLACEHOLDER_IMAGE, dryrun=false } = {}) {
+  const html = await fetchRenderedHtml(url);
+
+  // 1) split mode: try multi-section on the same page
+  if (mode === "split" || mode === "auto") {
+    const sections = extractSectionsFromHtml(html, url);
+    if (sections.length >= 2) {
+      if (dryrun) return { modeUsed: "split", sections, results: [] };
+      const results = [];
+      for (const sec of sections) {
+        try {
+          const posted = await postNews({
+            title: sec.title,
+            excerpt: sec.excerpt || "",
+            image_url: sec.image_url || imageFallback,
+            content_markdown: sec.content_markdown,
+            tags: [tag],
+            author: "FPL Mundo",
+          });
+          results.push({ ok:true, id: posted.id, title: sec.title });
+        } catch (e) {
+          results.push({ ok:false, title: sec.title, error: extractError(e) });
+        }
+      }
+      return { modeUsed: "split", sections, results };
+    }
+    if (mode === "split") {
+      return { modeUsed: "split", sections: [], results: [], note: "No distinct sections found" };
+    }
+  }
+
+  // 2) list mode: find child article links and publish each
+  if (mode === "list" || mode === "auto") {
+    const links = collectMundoArticleLinks(html, url, max);
+    if (links.length) {
+      const items = [];
+      for (const link of links) {
+        try {
+          const art = await fetchFplMundoArticle(link);
+          items.push({ link, art });
+        } catch (e) {
+          items.push({ link, error: e?.message || String(e) });
+        }
+      }
+      if (dryrun) return { modeUsed: "list", items, results: [] };
+      const results = [];
+      for (const it of items) {
+        if (!it.art) { results.push({ ok:false, title: it.link, error: it.error || "parse failed" }); continue; }
+        try {
+          const posted = await postNews({
+            title: it.art.title,
+            excerpt: it.art.excerpt,
+            image_url: it.art.image_url || imageFallback,
+            content_markdown: it.art.markdown,
+            tags: [tag],
+            author: "FPL Mundo",
+          });
+          results.push({ ok:true, id: posted.id, title: it.art.title });
+        } catch (e) {
+          results.push({ ok:false, title: it.art.title, error: extractError(e) });
+        }
+      }
+      return { modeUsed: "list", items, results };
+    }
+  }
+
+  // 3) fallback: treat the page as a single article
+  try {
+    const one = await fetchFplMundoArticle(url);
+    if (dryrun) return { modeUsed: "single", one, results: [] };
+    const posted = await postNews({
+      title: one.title,
+      excerpt: one.excerpt,
+      image_url: one.image_url || imageFallback,
+      content_markdown: one.markdown,
+      tags: [tag],
+      author: "FPL Mundo",
+    });
+    return { modeUsed: "single", one, results: [{ ok:true, id: posted.id, title: one.title }] };
+  } catch (e) {
+    return { modeUsed: "single", one: null, results: [{ ok:false, error: e?.message || String(e) }] };
+  }
+}
+
+
 
 async function scheduleDeadlineReminders() {
   if (!REMINDER_CHANNEL_ID) {
@@ -2132,6 +2524,7 @@ async function generateMatchupPreview(league, gameweek) {
   const teams = normalizeTeams(rows);
 
   if (!teams.length) {
+    console.log("Preview Gen Failed - length of teams");
     return null;
   }
 
@@ -2140,6 +2533,7 @@ async function generateMatchupPreview(league, gameweek) {
 
 
   if (!fixtures || fixtures.length === 0) {
+    console.log("Preview Gen Failed - length of fixtures");
     return null;
   }
 
@@ -2148,6 +2542,7 @@ async function generateMatchupPreview(league, gameweek) {
 
   
   if (!matchups || matchups.length === 0) {
+    console.log("Preview Gen Failed - length of matchups");
     return null;
   }
 
@@ -2382,50 +2777,118 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.commandName === "mundo_publish") {
-  await interaction.deferReply({ ephemeral: false });
-  const actorId = interaction.user.id;
+    //await interaction.deferReply({ ephemeral: false });
+    await safeDefer(interaction, { ephemeral: false });
+    const actorId = interaction.user.id;
 
-  // Require mod (re-use your flexible check)
-  try {
-    ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
-  } catch (e) {
-    return interaction.editReply(`❌ ${e.message || "You don’t have permission to publish."}`);
-  }
-
-  const league = interaction.options.getString("league", true);
-  const overrideUrl = interaction.options.getString("url") || null;
-  const dryrun = !!interaction.options.getBoolean("dryrun");
-
-  const leagueUrl = overrideUrl ||
-    (league === "premier" ? FPL_MUNDO_PREMIER_URL : FPL_MUNDO_CHAMP_URL);
-
-  try {
-    const { sections, results } = await publishFplMundoMulti(leagueUrl, {
-      tag: FPL_MUNDO_TAG,
-      imageFallback: FPL_MUNDO_PLACEHOLDER_IMAGE,
-    });
-
-    if (!sections.length) {
-      return interaction.editReply(`⚠️ I couldn’t find distinct article sections on that page.`);
+    // Require mod (re-use your flexible check)
+    try {
+      ensureCanEditFlexible(actorId, { mode: "name", isSelf: false, name: "__publish__", display: "publish" });
+    } catch (e) {
+      return interaction.editReply(`❌ ${e.message || "You don’t have permission to publish."}`);
     }
 
-    if (dryrun) {
-      const titles = sections.map((s,i)=>`• ${i+1}. ${s.title}`).join("\n");
-      return interaction.editReply(`📝 **Preview only** — found ${sections.length} sections on ${league} page:\n${titles}`);
+    const league = interaction.options.getString("league", true);
+    const overrideUrl = interaction.options.getString("url") || null;
+    const mode = interaction.options.getString("mode") || "auto";
+    const max  = interaction.options.getInteger("max") || 4;
+    const dryrun = !!interaction.options.getBoolean("dryrun");
+
+    const leagueUrl = overrideUrl ||
+      (league === "premier" ? FPL_MUNDO_PREMIER_URL : FPL_MUNDO_CHAMP_URL);
+
+    try {
+
+      let publishedMsg = "";
+
+      const doSplit = async () => await publishFplMundoMulti(leagueUrl, {
+        tag: FPL_MUNDO_TAG, imageFallback: FPL_MUNDO_PLACEHOLDER_IMAGE
+      });
+      const doList  = async () => await publishFplMundoFromList(leagueUrl, {
+        tag: FPL_MUNDO_TAG, imageFallback: FPL_MUNDO_PLACEHOLDER_IMAGE, max, dryrun
+      });
+
+      let out = null;
+      if (mode === "split") {
+        out = await doSplit();
+        if (!out.sections?.length) {
+          return interaction.editReply("⚠️ No sections found (split mode). Try `mode:list`.");
+        }
+        const ok = out.results.filter(r=>r.ok);
+        const fail = out.results.filter(r=>!r.ok);
+        publishedMsg =
+          `✅ Published ${ok.length}/${out.sections.length} section(s) via split.\n` +
+          (ok.length ? `Posted:\n${ok.map(o=>`• ${o.title} (id: ${o.id})`).join("\n")}\n` : "") +
+          (fail.length ? `\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}` : "");
+        return interaction.editReply(publishedMsg);
+      }
+
+      if (mode === "list") {
+        const listOut = await doList();
+        if (!listOut.links?.length) return interaction.editReply("⚠️ No article links found on that page.");
+        if (dryrun) {
+          return interaction.editReply(
+            `📝 **Preview (list mode)** — found ${listOut.links.length} links:\n` +
+            listOut.links.map((l,i)=>`• ${i+1}. ${l.title || l.url}`).join("\n")
+          );
+        }
+        const ok = listOut.results.filter(r=>r.ok);
+        const fail = listOut.results.filter(r=>!r.ok);
+        publishedMsg =
+          `✅ Published ${ok.length}/${listOut.links.length} post(s) from the page.\n` +
+          (ok.length ? `Posted:\n${ok.map(o=>`• ${o.title} (id: ${o.id ?? "—"})`).join("\n")}\n` : "") +
+          (fail.length ? `\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}` : "");
+        return interaction.editReply(publishedMsg);
+      }
+
+      // mode === auto : try split first, then list as fallback
+      let splitOut = await doSplit();
+      if (splitOut.sections?.length >= 2) {
+        const ok = splitOut.results.filter(r=>r.ok);
+        const fail = splitOut.results.filter(r=>!r.ok);
+        publishedMsg =
+          `✅ Published ${ok.length}/${splitOut.sections.length} section(s) via split.\n` +
+          (ok.length ? `Posted:\n${ok.map(o=>`• ${o.title} (id: ${o.id})`).join("\n")}\n` : "") +
+          (fail.length ? `\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}` : "");
+        return interaction.editReply(publishedMsg);
+      }
+
+      // fallback to list mode
+      const listOut = await doList();
+      if (!listOut.links?.length) {
+        return interaction.editReply("⚠️ No sections and no article links found on that page.");
+      }
+      if (dryrun) {
+        return interaction.editReply(
+          `📝 **Preview (auto→list)** — found ${listOut.links.length} links:\n` +
+          listOut.links.map((l,i)=>`• ${i+1}. ${l.title || l.url}`).join("\n")
+        );
+      }
+      const ok = listOut.results.filter(r=>r.ok);
+      const fail = listOut.results.filter(r=>!r.ok);
+      publishedMsg =
+        `✅ Published ${ok.length}/${listOut.links.length} post(s) (auto→list).\n` +
+        (ok.length ? `Posted:\n${ok.map(o=>`• ${o.title} (id: ${o.id ?? "—"})`).join("\n")}\n` : "") +
+        (fail.length ? `\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}` : "");
+      return interaction.editReply(publishedMsg);
+
+      // if (dryrun) {
+      //   const titles = sections.map((s,i)=>`• ${i+1}. ${s.title}`).join("\n");
+      //   return interaction.editReply(`📝 **Preview only** — found ${sections.length} sections on ${league} page:\n${titles}`);
+      // }
+
+      // // summarize published
+      // const ok = results.filter(r => r.ok);
+      // const fail = results.filter(r => !r.ok);
+      // let msg = `✅ Published ${ok.length}/${sections.length} section(s) from the ${league} page.`;
+      // if (ok.length) msg += `\nPosted:\n${ok.map(o=>`• ${o.title} (id: ${o.id})`).join("\n")}`;
+      // if (fail.length) msg += `\n\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}`;
+      // return interaction.editReply(msg);
+
+    } catch (e) {
+      console.error("mundo_publish error:", e);
+      return interaction.editReply(`❌ Failed to process that page: ${e?.message || e}`);
     }
-
-    // summarize published
-    const ok = results.filter(r => r.ok);
-    const fail = results.filter(r => !r.ok);
-    let msg = `✅ Published ${ok.length}/${sections.length} section(s) from the ${league} page.`;
-    if (ok.length) msg += `\nPosted:\n${ok.map(o=>`• ${o.title} (id: ${o.id})`).join("\n")}`;
-    if (fail.length) msg += `\n\n❌ Failed:\n${fail.map(f=>`• ${f.title} — ${f.error}`).join("\n")}`;
-    return interaction.editReply(msg);
-
-  } catch (e) {
-    console.error("mundo_publish error:", e);
-    return interaction.editReply(`❌ Failed to process that page: ${e?.message || e}`);
-  }
 }
 
 

@@ -1209,15 +1209,31 @@ async function fetchLeagueTable(league) {
 
 // Basic normalize to known fields
 function normalizeTeams(rows) {
-  return rows.map((r, i) => ({
-    position: Number(r.Position ?? r.position ?? r.rank ?? i + 1),
-    team: r.Team ?? r.team ?? r.team_name ?? r.name ?? "Unknown Team",
-    owner: r.Owner ?? r.owner ?? r.manager ?? r.owner_name ?? r.user ?? r.coach ?? "Unknown",
-    totalScore: Number(r.Score ?? r.total_score ?? r.total ?? r.season_points ?? 0),
-    h2hPoints: Number(r.Points ?? r.points ?? r.h2h_points ?? r.h2h ?? 0),
-    value: Number(r["Current Team Value"] ?? r.value ?? r.team_value ?? 0),
-    recent: r.form || r.recent || "",
-  })).sort((a,b)=>a.position-b.position);
+  return rows.map((r, i) => {
+    const position =
+      Number(r.Position ?? r.position ?? r.rank ?? i + 1);
+
+    // Add FPL H2H names
+    const team =
+      r.Team ?? r.team ?? r.team_name ?? r.entry_name ?? r.name ?? "Unknown Team";
+
+    const owner =
+      r.Owner ?? r.owner ?? r.manager ?? r.owner_name ?? r.player_name ?? r.user ?? r.coach ?? "Unknown";
+
+    // Map season total and H2H points correctly
+    const totalScore =
+      Number(r.Score ?? r.total_score ?? r.points_for ?? r.season_points ?? 0);
+
+    const h2hPoints =
+      Number(r.Points ?? r.points ?? r.h2h_points ?? r.h2h ?? r.total ?? 0);
+
+    const value =
+      Number(r["Current Team Value"] ?? r.value ?? r.team_value ?? 0);
+
+    const recent = r.form || r.recent || "";
+
+    return { position, team, owner, totalScore, h2hPoints, value, recent };
+  }).sort((a, b) => a.position - b.position);
 }
 
 // Heuristic "drama" scoring and pairing (not actual fixtures)
@@ -1936,6 +1952,18 @@ const runPreviews = async (label) => {
         reasons.push(`${league}: no fixtures`);
         continue;
       }
+
+      console.log("teams sample", teams.slice(0, 3).map(t => ({
+        position: t.position, team: t.team, owner: t.owner, h2hPoints: t.h2hPoints, totalScore: t.totalScore
+      })));
+
+      console.log("fixtures sample", fixtures.slice(0, 3).map(fx => ({
+        aOwner: fx.a_owner || fx.owner_a || fx.entry_1_player_name,
+        aTeam:  fx.a_team  || fx.team_a  || fx.entry_1_name,
+        bOwner: fx.b_owner || fx.owner_b || fx.entry_2_player_name,
+        bTeam:  fx.b_team  || fx.team_b  || fx.entry_2_name
+      })));
+
 
       const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
       if (!picks.length) {

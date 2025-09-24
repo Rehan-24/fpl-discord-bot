@@ -1222,6 +1222,7 @@ function normalizeTeams(rows) {
 
 // Heuristic "drama" scoring and pairing (not actual fixtures)
 function selectDramaticMatchups(teams, {league, fixtures, gw} = {}) {
+  console.log("teams lengthj", teams.length);
   if (teams.length < 6) return [];
 
   // If fixtures are available for the upcoming GW, score actual pairings.

@@ -1140,40 +1140,72 @@ function mentionForOwner(owner) {
   return id ? `<@${id}>` : owner;
 }
 
+async function fetchFplH2HStandingsAllPages(leagueId) {
+  const base = `https://fantasy.premierleague.com/api/leagues-h2h/${leagueId}/standings/`;
+  let page = 1, out = [], hasNext = true;
+
+  while (hasNext) {
+    const url = `${base}?page=${page}`;
+    const { data } = await axios.get(url, { timeout: 15000 });
+    const chunk = data?.standings?.results || [];
+    out = out.concat(chunk);
+    hasNext = !!data?.standings?.has_next;
+    page += 1;
+  }
+  return out; // array of rows with entry_name, player_name, total, wins/losses/draws, etc.
+}
+
+
 // Try multiple endpoints to fetch league tables; return [] on failure
 async function fetchLeagueTable(league) {
   const urls = [];
-  if (process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]) {
-    urls.push(process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]);
-    console.log("inside if - ", process.env[`LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`]);
+  const envKey = `LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`;
+
+  if (process.env[envKey]) {
+    urls.push(process.env[envKey]);
+    console.log("inside if - ", process.env[envKey]);
   }
   console.log("after if - ", urls);
+
   // Try backend then site fallbacks
   urls.push(
-    `${BASE}/standings?league=${league}`,     // <-- NEW: your FastAPI route
+    `${BASE}/standings?league=${league}`,
     `${BASE}/league/${league}`,
     `${BASE}/${league}`,
     `${SITE_BASE}/api/${league}`
   );
   console.log("outside if - ", urls);
+
   for (const u of urls) {
     try {
-      const { data } = await axios.get(u);
-      // Expect array of teams or {teams:[...]}
-      // handle nested shapes, especially { data: { rows: [...] } }
+      // Special-case: direct FPL H2H endpoint(s)
+      if (/fantasy\.premierleague\.com\/api\/leagues-h2h\/\d+\/standings/i.test(u)) {
+        const leagueId = (u.match(/leagues-h2h\/(\d+)\/standings/i) || [])[1];
+        if (leagueId) {
+          const all = await fetchFplH2HStandingsAllPages(leagueId);
+          if (all.length) return all;
+        }
+      }
+
+      const { data } = await axios.get(u, { timeout: 15000 });
+
+      // Unified shape extraction (now includes FPL's shape):
       const arr =
         Array.isArray(data) ? data :
         Array.isArray(data?.rows) ? data.rows :
         Array.isArray(data?.data?.rows) ? data.data.rows :
+        Array.isArray(data?.standings?.results) ? data.standings.results : // <-- FPL H2H
         (data?.teams || data?.table || []);
-      console.log("arr - ", arr);
+
+      console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
-      /* try next */
+      // try next URL
     }
   }
   return [];
 }
+
 
 // Basic normalize to known fields
 function normalizeTeams(rows) {

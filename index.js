@@ -3088,10 +3088,9 @@ app.post("/publish-news", async (req, res) => {
         continue;
       }
 
-      // Shape payload for your existing publishing function
       const news = {
         title: parsed.title,
-        tags: parsed.tags,                 // if postNews expects array, split here instead
+        tags: parsed.tags, // split into array if your backend expects one
         excerpt: parsed.excerpt,
         image_url: parsed.image_url || null,
         content_markdown: parsed.content,
@@ -3099,15 +3098,40 @@ app.post("/publish-news", async (req, res) => {
       };
 
       try {
-        // e.g., await postNews(news);
-        if (typeof postNews === "function") {
-          await postNews(news);
+        const resNews = await postNews(news);
+
+        console.log(`[publish-news] Posted: "${parsed.title}" →`, resNews);
+
+        if (resNews?.error || resNews?.status === "error") {
+          results.push({ line: parsed.title, ok: false, error: resNews.error || "backend error" });
         } else {
-          console.warn("postNews(news) not found; implement or import it");
+          results.push({ line: parsed.title, ok: true, id: resNews?.id || null });
         }
-        results.push({ line: parsed.title, ok: true });
       } catch (e) {
-        results.push({ line: parsed.title, ok: false, error: e?.message || "publish failed" });
+        const detail = e?.response?.data?.detail || e?.message || "publish failed";
+        console.error(`[publish-news] FAILED for "${parsed.title}":`, detail);
+        results.push({ line: parsed.title, ok: false, error: detail });
+      }
+    }
+
+    // --- Discord channel summary ---
+    const channelId = process.env.TFPLA_CHANNEL_ID;
+    if (channelId) {
+      try {
+        const ch = await client.channels.fetch(channelId);
+        if (ch) {
+          const success = results.filter(r => r.ok).length;
+          const failed = results.length - success;
+          await ch.send(
+            `📢 **FPL Mundo Auto-Publish** (${payload.source || "unknown"})\n` +
+            `✅ ${success} succeeded, ❌ ${failed} failed.\n` +
+            results.map(r =>
+              `${r.ok ? "✅" : "❌"} ${r.line}${r.error ? ` → ${r.error}` : ""}`
+            ).join("\n")
+          );
+        }
+      } catch (err) {
+        console.error("[publish-news] Failed to send Discord summary:", err);
       }
     }
 
@@ -3117,6 +3141,7 @@ app.post("/publish-news", async (req, res) => {
     return res.status(500).json({ ok: false, error: "server error" });
   }
 });
+
 
 // Railway will expose this port
 const PORT = process.env.PORT || 3000;

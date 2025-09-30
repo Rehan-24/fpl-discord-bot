@@ -2,8 +2,7 @@ name: FPL Mundo weekly scrape
 
 on:
   schedule:
-    # 9:07 AM Pacific — PDT=16:07 UTC, PST=17:07 UTC
-    - cron: "7 16 * * 2"
+    # 9:07 AM Pacific
     - cron: "7 17 * * 2"
   workflow_dispatch: {}
 
@@ -41,7 +40,7 @@ jobs:
       - name: Generate Championship commands
         run: python scripts/gen_chmps.py > chmps.json
 
-            - name: Health check (bot reachable?)
+      - name: Health check (bot reachable?)
         env:
           BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}   # e.g. https://<railway-domain>
         run: |
@@ -78,7 +77,6 @@ jobs:
           echo
           echo "Championship POST done"
 
-
       - name: Upload payloads & dumps (artifact)
         uses: actions/upload-artifact@v4
         with:
@@ -91,4 +89,3 @@ jobs:
             prem_json_*.txt
             chmps_json_*.txt
           if-no-files-found: ignore
-

@@ -3146,7 +3146,7 @@ app.post("/publish-news", async (req, res) => {
 
 
 // Railway will expose this port
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
 
 

@@ -7,6 +7,10 @@ const cheerio = require("cheerio");
 const { JSDOM } = require("jsdom");
 const TurndownService = require("turndown");
 const { Readability } = require("@mozilla/readability");
+const express = require("express");
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+
 
 
 
@@ -3017,5 +3021,106 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.reply({ content: `❌ ${detail}`, ephemeral: true });
   }
 });
+
+// =================== FPL Mundo inbound endpoint (from GitHub Actions) ===================
+// Set on Railway → Variables: BOT_SECRET = (strong random)
+const BOT_SECRET = process.env.BOT_SECRET;
+
+// Parse one "/publish_news ..." line into fields our postNews(...) expects
+function parsePublishCommand(line) {
+  if (!line || !/^\/publish_news\b/.test(line)) return null;
+
+  // Find key positions: title|content|tags|excerpt|image_url
+  const pattern = new RegExp(String.raw`(?:^|\s)(title|content|tags|excerpt|image_url):\s`, "ig");
+  const positions = [];
+  let m;
+  while ((m = pattern.exec(line)) !== null) {
+    positions.push({ key: m[1].toLowerCase(), index: m.index + m[0].length });
+  }
+  if (!positions.length) return null;
+
+  const obj = {};
+  for (let i = 0; i < positions.length; i++) {
+    const { key, index } = positions[i];
+    const end = (i + 1 < positions.length)
+      ? positions[i + 1].index - positions[i + 1].key.length - 2
+      : line.length;
+    obj[key] = line.slice(index, end).trim();
+  }
+  return {
+    title: (obj.title || "").trim(),
+    content: (obj.content || "").trim(),
+    tags: (obj.tags || "").trim(),
+    excerpt: (obj.excerpt || "").trim(),
+    image_url: (obj.image_url || "").trim() || null,
+  };
+}
+
+/**
+ * POST /publish-news
+ * Body can be either:
+ *   { "source": "premier", "commands": ["/publish_news ...", ...] }
+ * or just:
+ *   ["/publish_news ...", ...]
+ * Header:
+ *   X-Auth: <BOT_SECRET>
+ */
+app.post("/publish-news", async (req, res) => {
+  try {
+    if (!BOT_SECRET || req.get("x-auth") !== BOT_SECRET) {
+      return res.status(401).json({ ok: false, error: "unauthorized" });
+    }
+
+    const payload = req.body;
+    const cmds = Array.isArray(payload) ? payload
+              : Array.isArray(payload?.commands) ? payload.commands
+              : [];
+
+    if (!cmds.length) {
+      return res.status(400).json({ ok: false, error: "no commands" });
+    }
+
+    const results = [];
+    for (const line of cmds) {
+      const parsed = parsePublishCommand(String(line));
+      if (!parsed) {
+        results.push({ line: String(line).slice(0, 80), ok: false, error: "not a /publish_news line" });
+        continue;
+      }
+
+      // Shape payload for your existing publishing function
+      const news = {
+        title: parsed.title,
+        tags: parsed.tags,                 // if postNews expects array, split here instead
+        excerpt: parsed.excerpt,
+        image_url: parsed.image_url || null,
+        content_markdown: parsed.content,
+        author: "FPL Mundo Bot (Action)",
+      };
+
+      try {
+        // e.g., await postNews(news);
+        if (typeof postNews === "function") {
+          await postNews(news);
+        } else {
+          console.warn("postNews(news) not found; implement or import it");
+        }
+        results.push({ line: parsed.title, ok: true });
+      } catch (e) {
+        results.push({ line: parsed.title, ok: false, error: e?.message || "publish failed" });
+      }
+    }
+
+    return res.json({ ok: true, count: results.length, results });
+  } catch (err) {
+    console.error("[/publish-news] error", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+// Railway will expose this port
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+
 
 client.login(process.env.BOT_TOKEN);

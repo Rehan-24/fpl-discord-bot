@@ -2,12 +2,9 @@ name: FPL Mundo weekly scrape
 
 on:
   schedule:
-    # 9:07 AM Pacific: PDT=16:07 UTC, PST=17:07 UTC
-    - cron: "7 16 * * 2"
+    # 9:07 AM Pacific
     - cron: "7 17 * * 2"
   workflow_dispatch: {}
-
-permissions: {}
 
 jobs:
   scrape-and-push:
@@ -37,49 +34,16 @@ jobs:
           pip install playwright bs4 lxml
           python -m playwright install --with-deps
 
-      - name: Generate commands (Premier → JSON)
-        id: prem
-        run: |
-          python - <<'PY' > prem.json
-import subprocess, shlex, json
-cmd = "python mundo_scraper.py https://www.fplmundo.com/723566"
-runs = []
-for _ in range(2):  # run twice
-    out = subprocess.check_output(shlex.split(cmd), text=True, stderr=subprocess.STDOUT)
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    runs.append(lines)
-# flatten & de-dup, preserve order
-seen=set(); merged=[]
-for lines in runs:
-    for l in lines:
-        if l not in seen:
-            merged.append(l); seen.add(l)
-print(json.dumps({"source":"premier","commands":merged}, ensure_ascii=False, indent=2))
-PY
+      - name: Generate Premier commands
+        run: python scripts/gen_prem.py > prem.json
 
-      - name: Generate commands (Championship → JSON)
-        id: chmps
-        run: |
-          python - <<'PY' > chmps.json
-import subprocess, shlex, json
-cmd = "python mundo_scraper.py https://www.fplmundo.com/850022"
-runs = []
-for _ in range(2):
-    out = subprocess.check_output(shlex.split(cmd), text=True, stderr=subprocess.STDOUT)
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    runs.append(lines)
-seen=set(); merged=[]
-for lines in runs:
-    for l in lines:
-        if l not in seen:
-            merged.append(l); seen.add(l)
-print(json.dumps({"source":"championship","commands":merged}, ensure_ascii=False, indent=2))
-PY
+      - name: Generate Championship commands
+        run: python scripts/gen_chmps.py > chmps.json
 
       - name: POST Premier to bot
         env:
-          BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}   # e.g. https://<your-railway-domain>/publish-news
-          BOT_SECRET:   ${{ secrets.BOT_SECRET }}
+          BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET }}
         run: |
           curl -sS -X POST "$BOT_ENDPOINT" \
             -H "Content-Type: application/json" \
@@ -89,7 +53,7 @@ PY
       - name: POST Championship to bot
         env:
           BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}
-          BOT_SECRET:   ${{ secrets.BOT_SECRET }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET }}
         run: |
           curl -sS -X POST "$BOT_ENDPOINT" \
             -H "Content-Type: application/json" \

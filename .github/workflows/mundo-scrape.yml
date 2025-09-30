@@ -41,25 +41,43 @@ jobs:
       - name: Generate Championship commands
         run: python scripts/gen_chmps.py > chmps.json
 
+            - name: Health check (bot reachable?)
+        env:
+          BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}   # e.g. https://<railway-domain>
+        run: |
+          echo "Pinging $BOT_ENDPOINT/health ..."
+          curl -sS -m 15 -v "$BOT_ENDPOINT/health" || (echo "Health check failed"; exit 1)
+          echo
+          echo "Health OK"
+
       - name: POST Premier to bot
         env:
-          BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}
-          BOT_SECRET: ${{ secrets.BOT_SECRET }}
+          BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}   # base URL only, no path
+          BOT_SECRET:   ${{ secrets.BOT_SECRET }}
         run: |
-          curl -sS -X POST "$BOT_ENDPOINT" \
+          echo "Posting Premier payload to $BOT_ENDPOINT/publish-news"
+          curl --fail-with-body -sS -m 30 -v \
+            -X POST "$BOT_ENDPOINT/publish-news" \
             -H "Content-Type: application/json" \
             -H "X-Auth: $BOT_SECRET" \
             --data-binary @prem.json
+          echo
+          echo "Premier POST done"
 
       - name: POST Championship to bot
         env:
           BOT_ENDPOINT: ${{ secrets.BOT_ENDPOINT }}
-          BOT_SECRET: ${{ secrets.BOT_SECRET }}
+          BOT_SECRET:   ${{ secrets.BOT_SECRET }}
         run: |
-          curl -sS -X POST "$BOT_ENDPOINT" \
+          echo "Posting Championship payload to $BOT_ENDPOINT/publish-news"
+          curl --fail-with-body -sS -m 30 -v \
+            -X POST "$BOT_ENDPOINT/publish-news" \
             -H "Content-Type: application/json" \
             -H "X-Auth: $BOT_SECRET" \
             --data-binary @chmps.json
+          echo
+          echo "Championship POST done"
+
 
       - name: Upload payloads & dumps (artifact)
         uses: actions/upload-artifact@v4

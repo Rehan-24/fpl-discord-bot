@@ -3056,18 +3056,21 @@ function parsePublishCommand(line) {
   };
 }
 
-/**
- * POST /publish-news
- * Body can be either:
- *   { "source": "premier", "commands": ["/publish_news ...", ...] }
- * or just:
- *   ["/publish_news ...", ...]
- * Header:
- *   X-Auth: <BOT_SECRET>
- */
+// Trust reverse proxy (Railway) for correct IP logging
+app.set("trust proxy", true);
+
+// Simple health check so Actions can verify reachability
+app.get("/health", (req, res) => {
+  console.log(`[health] GET from ${req.ip || "unknown"} @ ${new Date().toISOString()}`);
+  res.json({ ok: true, service: "fpl-discord-bot", ts: Date.now() });
+});
+
+// Enhanced logging for publish endpoint
 app.post("/publish-news", async (req, res) => {
+  console.log(`[publish-news] POST from ${req.ip || "unknown"} size=${(JSON.stringify(req.body)||"").length}`);
   try {
     if (!BOT_SECRET || req.get("x-auth") !== BOT_SECRET) {
+      console.warn("[publish-news] unauthorized");
       return res.status(401).json({ ok: false, error: "unauthorized" });
     }
 
@@ -3077,6 +3080,7 @@ app.post("/publish-news", async (req, res) => {
               : [];
 
     if (!cmds.length) {
+      console.warn("[publish-news] empty commands");
       return res.status(400).json({ ok: false, error: "no commands" });
     }
 
@@ -3090,7 +3094,7 @@ app.post("/publish-news", async (req, res) => {
 
       const news = {
         title: parsed.title,
-        tags: parsed.tags, // split into array if your backend expects one
+        tags: parsed.tags, // change to split(',') if  backend expects array
         excerpt: parsed.excerpt,
         image_url: parsed.image_url || null,
         content_markdown: parsed.content,
@@ -3098,10 +3102,8 @@ app.post("/publish-news", async (req, res) => {
       };
 
       try {
-        const resNews = await postNews(news);
-
+        const resNews = await postNews(news); //  existing function
         console.log(`[publish-news] Posted: "${parsed.title}" →`, resNews);
-
         if (resNews?.error || resNews?.status === "error") {
           results.push({ line: parsed.title, ok: false, error: resNews.error || "backend error" });
         } else {
@@ -3114,7 +3116,7 @@ app.post("/publish-news", async (req, res) => {
       }
     }
 
-    // --- Discord channel summary ---
+    // Discord summary
     const channelId = process.env.TFPLA_CHANNEL_ID;
     if (channelId) {
       try {

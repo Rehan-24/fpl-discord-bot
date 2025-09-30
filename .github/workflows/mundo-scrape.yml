@@ -61,10 +61,16 @@ jobs:
             -H "X-Auth: $BOT_SECRET" \
             --data-binary @chmps.json
 
-      - name: Upload payloads (artifact) for debugging
+      - name: Upload payloads & dumps (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: mundo-payloads
           path: |
             prem.json
             chmps.json
+            prem_dump.html
+            chmps_dump.html
+            prem_json_*.txt
+            chmps_json_*.txt
+          if-no-files-found: ignore
+

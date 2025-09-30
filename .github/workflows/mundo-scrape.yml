@@ -2,7 +2,8 @@ name: FPL Mundo weekly scrape
 
 on:
   schedule:
-    # 9:07 AM Pacific
+    # 9:07 AM Pacific — PDT=16:07 UTC, PST=17:07 UTC
+    - cron: "7 16 * * 2"
     - cron: "7 17 * * 2"
   workflow_dispatch: {}
 

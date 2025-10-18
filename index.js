@@ -1658,7 +1658,7 @@ async function fetchFixtures(league, gw) {
 
   // 2) Fallback to official FPL H2H endpoint with warm-up, cookies, referer/origin
   // league may be an alias; prefer numeric id from env if provided
-  //const leagueId = Number(process.env[`FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
+  const leagueId = Number(process.env[`FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
   //if (!Number.isFinite(leagueId)) {
   //  console.log(`[fixtures] Invalid league id for fallback: "${league}" → set FPL_H2H_ID_${String(league).toUpperCase()} or pass numeric id`);
   //  return [];

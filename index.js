@@ -11,6 +11,10 @@ const express = require("express");
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+// ---- Robust GET with warm-up, cookies, Referer/Origin, backoff ----
+const https = require("https");
+const http = require("http");
+
 const DEFAULT_UA =
   process.env.FPL_USER_AGENT ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
@@ -19,46 +23,105 @@ const BASE_HEADERS = {
   "User-Agent": DEFAULT_UA,
   "Accept": "application/json, text/plain, */*",
   "Accept-Language": "en-US,en;q=0.8",
+  "Connection": "keep-alive",
 };
 
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
-const MAX_RETRIES = Number(process.env.FPL_MAX_RETRIES || 4);
-const BASE_DELAY_MS = Number(process.env.FPL_BASE_DELAY_MS || 350); // backoff base
-const RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 250); // between pages
+const keepAliveAgent = {
+  httpAgent: new http.Agent({ keepAlive: true, maxSockets: 50 }),
+  httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 50 }),
+};
+
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = Number(process.env.HTTP_MAX_RETRIES || 4);
+const BASE_DELAY_MS = Number(process.env.HTTP_BASE_DELAY_MS || 350);
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jitter(ms) { return ms + Math.floor(Math.random() * 120); }
 
-async function getWithRetries(url, { headers = {}, timeout = 15000, params } = {}) {
+// Very small cookie jar (no external deps). Parses Set-Cookie -> Cookie header.
+function parseSetCookieToCookieHeader(setCookieArr = []) {
+  try {
+    const cookies = [];
+    for (const raw of setCookieArr) {
+      // take only "name=value" before the first ';'
+      const nv = String(raw).split(";")[0].trim();
+      if (nv && nv.includes("=")) cookies.push(nv);
+    }
+    return cookies.join("; ");
+  } catch {
+    return "";
+  }
+}
+
+async function warmUpFplAndGetCookies() {
+  try {
+    const res = await axios.get("https://fantasy.premierleague.com/", {
+      ...keepAliveAgent,
+      timeout: 10000,
+      headers: {
+        ...BASE_HEADERS,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      validateStatus: () => true,
+    });
+    const setCookie = res.headers?.["set-cookie"];
+    const cookieHeader = Array.isArray(setCookie) ? parseSetCookieToCookieHeader(setCookie) : "";
+    return cookieHeader;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * getWithRetries(url, opts)
+ * opts: { headers, timeout, params, referer, origin, useFplWarmup }
+ */
+async function getWithRetries(url, { headers = {}, timeout = 15000, params, referer, origin, useFplWarmup } = {}) {
   let lastErr;
+  let cachedCookie = ""; // we only warm up once per call-chain
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      const hdrs = { ...BASE_HEADERS, ...headers };
+      if (origin) hdrs["Origin"] = origin;
+      if (referer) hdrs["Referer"] = referer;
+      if (cachedCookie) hdrs["Cookie"] = cachedCookie;
+
       const res = await axios.get(url, {
-        headers: { ...BASE_HEADERS, ...headers },
+        headers: hdrs,
         timeout,
         params,
-        // maxRedirects: 3,
-        // validateStatus: s => s >= 200 && s < 300,
+        ...keepAliveAgent,
       });
       return res;
     } catch (e) {
       const status = e?.response?.status;
       const msg = e?.message || String(e);
-      const retryable = status ? RETRYABLE_STATUS.has(status) : true; // network errors => retry
+      const retryable = status ? RETRYABLE.has(status) : true;
+
+      // One-time warm-up if 503/429/5xx and caller asked for it
+      if (!cachedCookie && useFplWarmup && retryable) {
+        cachedCookie = await warmUpFplAndGetCookies();
+      }
+
       if (attempt < MAX_RETRIES && retryable) {
-        const delay = jitter(BASE_DELAY_MS * Math.pow(2, attempt)); // exp backoff + jitter
+        let delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        const ra = e?.response?.headers?.["retry-after"];
+        if (ra) {
+          const sec = Number(ra);
+          if (!Number.isNaN(sec) && sec > 0) delay = Math.max(delay, sec * 1000);
+        }
+        delay = jitter(delay);
         console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`);
         await sleep(delay);
         lastErr = e;
         continue;
       }
-      // not retryable or out of retries
       throw e;
     }
   }
   throw lastErr || new Error(`Failed to GET ${url}`);
 }
-
 
 // ===== FPL Mundo scraping config =====
 // --- DEBUG ---
@@ -1463,20 +1526,126 @@ function clearReminders() {
 // [{home_owner, away_owner}] or [{home_team, away_team}] or generic {a_owner,b_owner,a_team,b_team}
 const DEFAULT_FPL_H2H_IDS = { premier: "723566", championship: "850022" };
 async function fetchFixtures(league, gw) {
-  // 1) Try env-configured endpoints first (keeps your existing flexibility)
+  // ---- tiny helpers (scoped) ----
+  const https = require("https");
+  const http = require("http");
+
+  const DEFAULT_UA =
+    process.env.FPL_USER_AGENT ||
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
+
+  const BASE_HEADERS = {
+    "User-Agent": DEFAULT_UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.8",
+    "Connection": "keep-alive",
+  };
+
+  const keepAliveAgent = {
+    httpAgent: new http.Agent({ keepAlive: true, maxSockets: 50 }),
+    httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 50 }),
+  };
+
+  const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+  const MAX_RETRIES = Number(process.env.HTTP_MAX_RETRIES || 4);
+  const BASE_DELAY_MS = Number(process.env.HTTP_BASE_DELAY_MS || 350);
+  const RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 250);
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function jitter(ms) { return ms + Math.floor(Math.random() * 120); }
+
+  function parseSetCookieToCookieHeader(setCookieArr = []) {
+    try {
+      const cookies = [];
+      for (const raw of setCookieArr) {
+        const nv = String(raw).split(";")[0].trim();
+        if (nv && nv.includes("=")) cookies.push(nv);
+      }
+      return cookies.join("; ");
+    } catch {
+      return "";
+    }
+  }
+
+  async function warmUpFplAndGetCookies() {
+    try {
+      const res = await axios.get("https://fantasy.premierleague.com/", {
+        ...keepAliveAgent,
+        timeout: 10000,
+        headers: {
+          ...BASE_HEADERS,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        validateStatus: () => true,
+      });
+      const setCookie = res.headers?.["set-cookie"];
+      return Array.isArray(setCookie) ? parseSetCookieToCookieHeader(setCookie) : "";
+    } catch {
+      return "";
+    }
+  }
+
+  async function getWithRetries(url, { headers = {}, timeout = 15000, params, referer, origin, useFplWarmup } = {}) {
+    let lastErr;
+    let cachedCookie = ""; // only warm once per call-chain
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const hdrs = { ...BASE_HEADERS, ...(globalThis.API_HEADERS || {}), ...headers };
+        if (origin) hdrs["Origin"] = origin;
+        if (referer) hdrs["Referer"] = referer;
+        if (cachedCookie) hdrs["Cookie"] = cachedCookie;
+
+        const res = await axios.get(url, {
+          headers: hdrs,
+          timeout,
+          params,
+          ...keepAliveAgent,
+        });
+        return res;
+      } catch (e) {
+        const status = e?.response?.status;
+        const msg = e?.message || String(e);
+        const retryable = status ? RETRYABLE.has(status) : true;
+
+        if (!cachedCookie && useFplWarmup && retryable) {
+          cachedCookie = await warmUpFplAndGetCookies();
+        }
+
+        if (attempt < MAX_RETRIES && retryable) {
+          let delay = BASE_DELAY_MS * Math.pow(2, attempt);
+          const ra = e?.response?.headers?.["retry-after"];
+          if (ra) {
+            const sec = Number(ra);
+            if (!Number.isNaN(sec) && sec > 0) delay = Math.max(delay, sec * 1000);
+          }
+          delay = jitter(delay);
+          console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`);
+          await sleep(delay);
+          lastErr = e;
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw lastErr || new Error(`Failed to GET ${url}`);
+  }
+  // ---- end helpers ----
+
+  // 1) Try env-configured endpoints first
   const urls = [];
-  const key = `LEAGUE_FIXTURES_ENDPOINT_${league.toUpperCase()}`; // e.g., PREMIER / CHAMPIONSHIP
+  const key = `LEAGUE_FIXTURES_ENDPOINT_${String(league).toUpperCase()}`; // e.g., PREMIER / CHAMPIONSHIP
   if (process.env[key]) urls.push(process.env[key]);
   if (process.env.LEAGUE_FIXTURES_ENDPOINT) urls.push(process.env.LEAGUE_FIXTURES_ENDPOINT);
 
   const hydrate = (u) => u
     .replace(/\{gw\}/g, String(gw))
-    .replace(/\{league\}/g, league);
+    .replace(/\{league\}/g, String(league));
 
   for (let baseUrl of urls) {
     try {
       const u = hydrate(baseUrl);
-      const { data } = await getWithRetries(u, { headers: API_HEADERS || {} });
+      const { data } = await getWithRetries(u, { headers: (globalThis.API_HEADERS || {}) });
       const arr = Array.isArray(data) ? data : (data?.fixtures || data?.matches);
       if (Array.isArray(arr) && arr.length) {
         return arr;
@@ -1487,12 +1656,11 @@ async function fetchFixtures(league, gw) {
     }
   }
 
-  // 2) Fallback: official FPL H2H endpoint (stable + public)
-  // Docs: /api/leagues-h2h-matches/league/{league_id}/?page={p}&event={gw}
-  // "league" here should be the numeric H2H league id (e.g., 723566 / 850022).
-  const leagueId = Number(process.env[`LEAGUE_FPL_H2H_ID_${league.toUpperCase()}`] || league);
+  // 2) Fallback to official FPL H2H endpoint with warm-up, cookies, referer/origin
+  // league may be an alias; prefer numeric id from env if provided
+  const leagueId = Number(process.env[`FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
   if (!Number.isFinite(leagueId)) {
-    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set LEAGUE_FPL_H2H_ID_${league.toUpperCase()} or pass numeric id`);
+    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set FPL_H2H_ID_${String(league).toUpperCase()} or pass numeric id`);
     return [];
   }
 
@@ -1503,17 +1671,24 @@ async function fetchFixtures(league, gw) {
   try {
     while (true) {
       const url = `${base}?page=${page}&event=${gw}`;
-      const { data } = await getWithRetries(url);
-      // Expected shape: { has_next: boolean, results: [...] }  (name occasionally varies)
+      const referer = `https://fantasy.premierleague.com/leagues/${leagueId}/matches?event=${gw}`;
+      const origin = "https://fantasy.premierleague.com";
+
+      const { data } = await getWithRetries(url, {
+        referer,
+        origin,
+        useFplWarmup: true,
+      });
+
       const arr = data?.results || data?.matches || data?.fixtures || [];
       for (const fx of arr) {
         fixtures.push({
           a_owner: fx.entry_1_player_name,
           b_owner: fx.entry_2_player_name,
-          a_team: fx.entry_1_name,
-          b_team: fx.entry_2_name,
+          a_team:  fx.entry_1_name,
+          b_team:  fx.entry_2_name,
           a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
-          b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null
+          b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null,
         });
       }
 

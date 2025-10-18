@@ -1550,9 +1550,9 @@ async function fetchFixtures(league, gw) {
   const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 
   const ORIGIN = "https://fantasy.premierleague.com";
-  const leagueId = Number(process.env[`FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
+  const leagueId = Number(process.env[`LEAGUE_FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
   if (!Number.isFinite(leagueId)) {
-    console.log(`[fixtures] Invalid league id for fallback: "${league}" (set FPL_H2H_ID_${String(league).toUpperCase()})`);
+    console.log(`[fixtures] Invalid league id for fallback: "${league}" (set LEAGUE_FPL_H2H_ID_${String(league).toUpperCase()})`);
     return [];
   }
   const matchesPage = `${ORIGIN}/leagues/${leagueId}/matches?event=${gw}`;

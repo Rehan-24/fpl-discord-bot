@@ -1247,7 +1247,7 @@ async function fetchLeagueTable(league) {
         Array.isArray(data?.standings?.results) ? data.standings.results : // <-- FPL H2H
         (data?.teams || data?.table || []);
 
-      console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
+      //console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
       // try next URL

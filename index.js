@@ -1526,20 +1526,21 @@ function clearReminders() {
 // [{home_owner, away_owner}] or [{home_team, away_team}] or generic {a_owner,b_owner,a_team,b_team}
 const DEFAULT_FPL_H2H_IDS = { premier: "723566", championship: "850022" };
 async function fetchFixtures(league, gw) {
-  // ---- tiny helpers (scoped) ----
   const https = require("https");
   const http = require("http");
 
-  const DEFAULT_UA =
-    process.env.FPL_USER_AGENT ||
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
+  // ----- Tunables -----
+  const MAX_RETRIES = Number(process.env.HTTP_MAX_RETRIES || 4);
+  const BASE_DELAY_MS = Number(process.env.HTTP_BASE_DELAY_MS || 350);
+  const RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 250);
 
-  const BASE_HEADERS = {
-    "User-Agent": DEFAULT_UA,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.8",
-    "Connection": "keep-alive",
-  };
+  // A realistic UA + client hints help a lot on Akamai/CDN-ed APIs
+  const UA =
+    process.env.FPL_USER_AGENT ||
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36";
+  const SEC_CH_UA =
+    process.env.FPL_SEC_CH_UA ||
+    '"Chromium";v="123", "Not(A:Brand";v="24", "Google Chrome";v="123"';
 
   const keepAliveAgent = {
     httpAgent: new http.Agent({ keepAlive: true, maxSockets: 50 }),
@@ -1547,80 +1548,97 @@ async function fetchFixtures(league, gw) {
   };
 
   const RETRYABLE = new Set([429, 500, 502, 503, 504]);
-  const MAX_RETRIES = Number(process.env.HTTP_MAX_RETRIES || 4);
-  const BASE_DELAY_MS = Number(process.env.HTTP_BASE_DELAY_MS || 350);
-  const RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 250);
 
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  function jitter(ms) { return ms + Math.floor(Math.random() * 120); }
+  const ORIGIN = "https://fantasy.premierleague.com";
+  const leagueId = Number(process.env[`FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
+  if (!Number.isFinite(leagueId)) {
+    console.log(`[fixtures] Invalid league id for fallback: "${league}" (set FPL_H2H_ID_${String(league).toUpperCase()})`);
+    return [];
+  }
+  const matchesPage = `${ORIGIN}/leagues/${leagueId}/matches?event=${gw}`;
 
-  function parseSetCookieToCookieHeader(setCookieArr = []) {
-    try {
-      const cookies = [];
-      for (const raw of setCookieArr) {
-        const nv = String(raw).split(";")[0].trim();
-        if (nv && nv.includes("=")) cookies.push(nv);
-      }
-      return cookies.join("; ");
-    } catch {
-      return "";
-    }
+  const BASE_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.8",
+    "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+    // Browser fetch metadata
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "sec-ch-ua": SEC_CH_UA,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+  };
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const jitter = (ms) => ms + Math.floor(Math.random() * 120);
+
+  // Minimal cookie jar just for this call
+  let cookieHeader = "";
+
+  function headersWith(origin, referer, extra = {}) {
+    const h = {
+      ...BASE_HEADERS,
+      ...(globalThis.API_HEADERS || {}),
+      ...extra,
+    };
+    if (origin) h.Origin = origin;
+    if (referer) h.Referer = referer;
+    if (cookieHeader) h.Cookie = cookieHeader;
+    return h;
   }
 
-  async function warmUpFplAndGetCookies() {
+  async function warmUp(url) {
     try {
-      const res = await axios.get("https://fantasy.premierleague.com/", {
+      const res = await axios.get(url, {
         ...keepAliveAgent,
         timeout: 10000,
-        headers: {
-          ...BASE_HEADERS,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
+        headers: headersWith(ORIGIN, url, {
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Dest": "document",
+        }),
         validateStatus: () => true,
       });
       const setCookie = res.headers?.["set-cookie"];
-      return Array.isArray(setCookie) ? parseSetCookieToCookieHeader(setCookie) : "";
-    } catch {
-      return "";
+      if (Array.isArray(setCookie) && setCookie.length) {
+        cookieHeader = setCookie.map((c) => String(c).split(";")[0].trim()).filter(Boolean).join("; ");
+      }
+      return true;
+    } catch (e) {
+      console.log("[fixtures] warm-up failed:", e?.response?.status || "", e?.message || e);
+      return false;
     }
   }
 
-  async function getWithRetries(url, { headers = {}, timeout = 15000, params, referer, origin, useFplWarmup } = {}) {
+  async function getWithRetries(url, { referer, origin, params, headers } = {}) {
     let lastErr;
-    let cachedCookie = ""; // only warm once per call-chain
-
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const hdrs = { ...BASE_HEADERS, ...(globalThis.API_HEADERS || {}), ...headers };
-        if (origin) hdrs["Origin"] = origin;
-        if (referer) hdrs["Referer"] = referer;
-        if (cachedCookie) hdrs["Cookie"] = cachedCookie;
-
         const res = await axios.get(url, {
-          headers: hdrs,
-          timeout,
-          params,
           ...keepAliveAgent,
+          timeout: 15000,
+          params,
+          headers: headersWith(origin, referer, headers),
         });
         return res;
       } catch (e) {
         const status = e?.response?.status;
-        const msg = e?.message || String(e);
         const retryable = status ? RETRYABLE.has(status) : true;
-
-        if (!cachedCookie && useFplWarmup && retryable) {
-          cachedCookie = await warmUpFplAndGetCookies();
+        // First time we see a retryable error, try a warm-up on the actual league matches page
+        if (attempt === 0 && retryable && !cookieHeader) {
+          await warmUp(matchesPage);
         }
-
         if (attempt < MAX_RETRIES && retryable) {
           let delay = BASE_DELAY_MS * Math.pow(2, attempt);
           const ra = e?.response?.headers?.["retry-after"];
-          if (ra) {
-            const sec = Number(ra);
-            if (!Number.isNaN(sec) && sec > 0) delay = Math.max(delay, sec * 1000);
-          }
+          const raSec = ra ? Number(ra) : NaN;
+          if (!Number.isNaN(raSec) && raSec > 0) delay = Math.max(delay, raSec * 1000);
           delay = jitter(delay);
-          console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`);
+          console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${e?.message}); waiting ${delay}ms`);
           await sleep(delay);
           lastErr = e;
           continue;
@@ -1630,87 +1648,87 @@ async function fetchFixtures(league, gw) {
     }
     throw lastErr || new Error(`Failed to GET ${url}`);
   }
-  // ---- end helpers ----
 
-  // 1) Try env-configured endpoints first
+  // 1) Try env-configured endpoints first (your existing behavior)
   const urls = [];
-  const key = `LEAGUE_FIXTURES_ENDPOINT_${String(league).toUpperCase()}`; // e.g., PREMIER / CHAMPIONSHIP
+  const key = `LEAGUE_FIXTURES_ENDPOINT_${String(league).toUpperCase()}`;
   if (process.env[key]) urls.push(process.env[key]);
   if (process.env.LEAGUE_FIXTURES_ENDPOINT) urls.push(process.env.LEAGUE_FIXTURES_ENDPOINT);
 
-  const hydrate = (u) => u
-    .replace(/\{gw\}/g, String(gw))
-    .replace(/\{league\}/g, String(league));
-
-  for (let baseUrl of urls) {
+  const hydrate = (u) => u.replace(/\{gw\}/g, String(gw)).replace(/\{league\}/g, String(league));
+  for (let raw of urls) {
+    const u = hydrate(raw);
     try {
-      const u = hydrate(baseUrl);
-      const { data } = await getWithRetries(u, { headers: (globalThis.API_HEADERS || {}) });
+      const { data } = await getWithRetries(u, { referer: matchesPage, origin: ORIGIN });
       const arr = Array.isArray(data) ? data : (data?.fixtures || data?.matches);
-      if (Array.isArray(arr) && arr.length) {
-        return arr;
-      }
-      console.log(`[fixtures] ${u} responded but no fixtures array found (keys: ${Object.keys(data || {}).join(",")})`);
+      if (Array.isArray(arr) && arr.length) return arr;
+      console.log(`[fixtures] ${u} responded but no fixtures array (keys: ${Object.keys(data || {}).join(",")})`);
     } catch (e) {
-      console.log(`[fixtures] Env endpoint failed (${baseUrl}) →`, e?.response?.status || "", e?.message || e);
+      console.log(`[fixtures] Env endpoint failed (${u}) →`, e?.response?.status || "", e?.message || e);
     }
   }
 
-  // 2) Fallback to official FPL H2H endpoint with warm-up, cookies, referer/origin
-  // league may be an alias; prefer numeric id from env if provided
-  const leagueId = Number(process.env[`LEAGUE_FPL_H2H_ID_${String(league).toUpperCase()}`] || league);
-  if (!Number.isFinite(leagueId)) {
-    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set FPL_H2H_ID_${String(league).toUpperCase()} or pass numeric id`);
-    return [];
-  }
+  // 2) FPL official endpoints (two variants) with warm-up, cookies, and browser-like headers
+  const variants = [
+    // primary
+    `${ORIGIN}/api/leagues-h2h-matches/league/${leagueId}/?page={page}&event=${gw}`,
+    // alt legacy-ish variant some mirrors still accept
+    `${ORIGIN}/api/leagues-h2h/${leagueId}/matches/?page={page}&event=${gw}`,
+  ];
 
-  const base = `https://fantasy.premierleague.com/api/leagues-h2h-matches/league/${leagueId}/`;
-  let page = 1;
   const fixtures = [];
-
   try {
-    while (true) {
-      const url = `${base}?page=${page}&event=${gw}`;
-      const referer = `https://fantasy.premierleague.com/leagues/${leagueId}/matches?event=${gw}`;
-      const origin = "https://fantasy.premierleague.com";
+    // prime cookies against the actual page we’ll “pretend” to be browsing
+    await warmUp(matchesPage);
 
-      const { data } = await getWithRetries(url, {
-        referer,
-        origin,
-        useFplWarmup: true,
-      });
+    for (const base of variants) {
+      let page = 1;
+      fixtures.length = 0; // reset for this variant
 
-      const arr = data?.results || data?.matches || data?.fixtures || [];
-      for (const fx of arr) {
-        fixtures.push({
-          a_owner: fx.entry_1_player_name,
-          b_owner: fx.entry_2_player_name,
-          a_team:  fx.entry_1_name,
-          b_team:  fx.entry_2_name,
-          a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
-          b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null,
+      while (true) {
+        const url = base.replace("{page}", String(page));
+        const { data } = await getWithRetries(url, {
+          referer: matchesPage,
+          origin: ORIGIN,
         });
+
+        const arr = data?.results || data?.matches || data?.fixtures || [];
+        if (Array.isArray(arr)) {
+          for (const fx of arr) {
+            fixtures.push({
+              a_owner: fx.entry_1_player_name,
+              b_owner: fx.entry_2_player_name,
+              a_team:  fx.entry_1_name,
+              b_team:  fx.entry_2_name,
+              a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
+              b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null,
+            });
+          }
+        }
+
+        const hasNext =
+          Boolean(data?.has_next) ||
+          Boolean(data?.standings?.has_next) ||
+          Boolean(data?.matches?.has_next) ||
+          false;
+
+        if (!hasNext) break;
+        page += 1;
+        if (page > 50) break;
+        if (RATE_LIMIT_MS > 0) await sleep(RATE_LIMIT_MS);
       }
 
-      const hasNext =
-        Boolean(data?.has_next) ||
-        Boolean(data?.standings?.has_next) ||
-        Boolean(data?.matches?.has_next) ||
-        false;
-
-      if (!hasNext) break;
-      page += 1;
-      if (page > 50) break; // safety
-      if (RATE_LIMIT_MS > 0) await sleep(RATE_LIMIT_MS);
+      if (fixtures.length) return fixtures;
+      // if this variant produced nothing, try next variant
     }
-
-    if (fixtures.length) return fixtures;
   } catch (e) {
     console.log("FPL H2H fixtures fetch failed:", e?.response?.status || "", e?.message || e);
   }
 
+  // 3) Nothing worked
   return [];
 }
+
 
 
 function normalizeFixture(fx) {

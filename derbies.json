@@ -206,7 +206,35 @@
     "league": "premier",
     "a_owner": "Kamil Sacha",
     "b_owner": "Aj Pepperney",
-    "label": "Mini League Rivals and Premier League Pride=",
+    "label": "Mini League Rivals and Premier League Pride",
     "reason": "While this matchup has seen its fair share of drama in certain Mini Leagues, it surely has more in store for the big stage."
+  },
+  {
+    "league": "championship",
+    "a_owner": "Aaron Frank",
+    "b_owner": "William Okine",
+    "label": "Down Together, Up Together?",
+    "reason": "Relegated together and familiar. Can both teams find some points to help push them back to the pinnacle of FPL?"
+  },
+  {
+    "league": "championship",
+    "a_owner": "man guy",
+    "b_owner": "Brynn Miller",
+    "label": "Bookies Favorites",
+    "reason": "Being close to the commissioner might explain why these two always start the season as the bookies favorite. Who has the backing of the script this time?"
+  },
+  {
+    "league": "championship",
+    "a_owner": "Casey Manos",
+    "b_owner": "Charlie Mullen",
+    "label": "The Sun Will Shine On Us One Day, Brother",
+    "reason": "Two teams who had been muddling around the championship for awhile. Is it Sunday League or FPL?"
+  },
+  {
+    "league": "championship",
+    "a_owner": "Aaron Frank",
+    "b_owner": "will franzoni",
+    "label": "Together?",
+    "reason": "Relegated together and familiar. Can both teams find some points to help push them back to the pinnacle of FPL?"
   }
 ]

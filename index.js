@@ -1490,9 +1490,9 @@ async function fetchFixtures(league, gw) {
   // 2) Fallback: official FPL H2H endpoint (stable + public)
   // Docs: /api/leagues-h2h-matches/league/{league_id}/?page={p}&event={gw}
   // "league" here should be the numeric H2H league id (e.g., 723566 / 850022).
-  const leagueId = Number(process.env[`FPL_H2H_ID_${league.toUpperCase()}`] || league);
+  const leagueId = Number(process.env[`LEAGUE_FPL_H2H_ID_${league.toUpperCase()}`] || league);
   if (!Number.isFinite(leagueId)) {
-    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set FPL_H2H_ID_${league.toUpperCase()} or pass numeric id`);
+    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set LEAGUE_FPL_H2H_ID_${league.toUpperCase()} or pass numeric id`);
     return [];
   }
 

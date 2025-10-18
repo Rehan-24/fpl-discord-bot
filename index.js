@@ -1247,7 +1247,7 @@ async function fetchLeagueTable(league) {
         Array.isArray(data?.standings?.results) ? data.standings.results : // <-- FPL H2H
         (data?.teams || data?.table || []);
 
-      //console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
+      console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
       // try next URL
@@ -2653,7 +2653,7 @@ async function postConfirmedIfChanged(channel) {
 async function generateMatchupPreview(league, gameweek) {
   // Fetch league table and fixtures
   const rows = await fetchLeagueTable(league);
-  console.log("League table data:", rows);
+  //console.log("League table data:", rows);
 
   const teams = normalizeTeams(rows);
 

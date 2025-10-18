@@ -11,7 +11,53 @@ const express = require("express");
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+const DEFAULT_UA =
+  process.env.FPL_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
 
+const BASE_HEADERS = {
+  "User-Agent": DEFAULT_UA,
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.8",
+};
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = Number(process.env.FPL_MAX_RETRIES || 4);
+const BASE_DELAY_MS = Number(process.env.FPL_BASE_DELAY_MS || 350); // backoff base
+const RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 250); // between pages
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function jitter(ms) { return ms + Math.floor(Math.random() * 120); }
+
+async function getWithRetries(url, { headers = {}, timeout = 15000, params } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await axios.get(url, {
+        headers: { ...BASE_HEADERS, ...headers },
+        timeout,
+        params,
+        // maxRedirects: 3,
+        // validateStatus: s => s >= 200 && s < 300,
+      });
+      return res;
+    } catch (e) {
+      const status = e?.response?.status;
+      const msg = e?.message || String(e);
+      const retryable = status ? RETRYABLE_STATUS.has(status) : true; // network errors => retry
+      if (attempt < MAX_RETRIES && retryable) {
+        const delay = jitter(BASE_DELAY_MS * Math.pow(2, attempt)); // exp backoff + jitter
+        console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`);
+        await sleep(delay);
+        lastErr = e;
+        continue;
+      }
+      // not retryable or out of retries
+      throw e;
+    }
+  }
+  throw lastErr || new Error(`Failed to GET ${url}`);
+}
 
 
 // ===== FPL Mundo scraping config =====
@@ -1417,57 +1463,80 @@ function clearReminders() {
 // [{home_owner, away_owner}] or [{home_team, away_team}] or generic {a_owner,b_owner,a_team,b_team}
 const DEFAULT_FPL_H2H_IDS = { premier: "723566", championship: "850022" };
 async function fetchFixtures(league, gw) {
+  // 1) Try env-configured endpoints first (keeps your existing flexibility)
   const urls = [];
-  const key = `LEAGUE_FIXTURES_ENDPOINT_${league.toUpperCase()}`;
+  const key = `LEAGUE_FIXTURES_ENDPOINT_${league.toUpperCase()}`; // e.g., PREMIER / CHAMPIONSHIP
   if (process.env[key]) urls.push(process.env[key]);
   if (process.env.LEAGUE_FIXTURES_ENDPOINT) urls.push(process.env.LEAGUE_FIXTURES_ENDPOINT);
-  const hydrate = (u) => u.replace(/\{gw\}/g, String(gw)).replace(/\{league\}/g, league);
-  for (let u of urls) {
+
+  const hydrate = (u) => u
+    .replace(/\{gw\}/g, String(gw))
+    .replace(/\{league\}/g, league);
+
+  for (let baseUrl of urls) {
     try {
-      u = hydrate(u);
-      const { data } = await axios.get(u, { headers: API_HEADERS });
-      if (Array.isArray(data) && data.length) return data;
-      const arr = data?.fixtures || data?.matches;
-      if (Array.isArray(arr) && arr.length) return arr;
-    } catch (e) { /* try next */ }
+      const u = hydrate(baseUrl);
+      const { data } = await getWithRetries(u, { headers: API_HEADERS || {} });
+      const arr = Array.isArray(data) ? data : (data?.fixtures || data?.matches);
+      if (Array.isArray(arr) && arr.length) {
+        return arr;
+      }
+      console.log(`[fixtures] ${u} responded but no fixtures array found (keys: ${Object.keys(data || {}).join(",")})`);
+    } catch (e) {
+      console.log(`[fixtures] Env endpoint failed (${baseUrl}) →`, e?.response?.status || "", e?.message || e);
+    }
   }
 
-  // Fallback: FPL public H2H endpoint if LEAGUE_FPL_H2H_ID_<LEAGUE> (or global) is set
-  const idKey = `LEAGUE_FPL_H2H_ID_${league.toUpperCase()}`;
-  const h2hId = process.env[idKey] || process.env.LEAGUE_FPL_H2H_ID || DEFAULT_FPL_H2H_IDS[league];
-  if (h2hId) {
-    try {
-      // Paginate until has_next==false
-      const fixtures = [];
-      let page = 1, hasNext = true;
-      while (hasNext) {
-        const url = `https://fantasy.premierleague.com/api/leagues-h2h-matches/league/${h2hId}/?event=${gw}&page=${page}`;
-        const { data } = await axios.get(url);
-        const res = data?.results || data?.standings?.results || data?.matches_next?.results || data?.matches?.results;
-        if (Array.isArray(res)) {
-          for (const fx of res) {
-            fixtures.push({
-              a_owner: fx.entry_1_player_name,
-              b_owner: fx.entry_2_player_name,
-              a_team: fx.entry_1_name,
-              b_team: fx.entry_2_name,
-              a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
-              b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null
-            });
-          }
-        }
-        hasNext = !!data?.has_next || !!data?.standings?.has_next || !!data?.matches?.has_next || false;
-        page += 1;
-        if (page > 50) break; // safety
+  // 2) Fallback: official FPL H2H endpoint (stable + public)
+  // Docs: /api/leagues-h2h-matches/league/{league_id}/?page={p}&event={gw}
+  // "league" here should be the numeric H2H league id (e.g., 723566 / 850022).
+  const leagueId = Number(process.env[`FPL_H2H_ID_${league.toUpperCase()}`] || league);
+  if (!Number.isFinite(leagueId)) {
+    console.log(`[fixtures] Invalid league id for fallback: "${league}" → set FPL_H2H_ID_${league.toUpperCase()} or pass numeric id`);
+    return [];
+  }
+
+  const base = `https://fantasy.premierleague.com/api/leagues-h2h-matches/league/${leagueId}/`;
+  let page = 1;
+  const fixtures = [];
+
+  try {
+    while (true) {
+      const url = `${base}?page=${page}&event=${gw}`;
+      const { data } = await getWithRetries(url);
+      // Expected shape: { has_next: boolean, results: [...] }  (name occasionally varies)
+      const arr = data?.results || data?.matches || data?.fixtures || [];
+      for (const fx of arr) {
+        fixtures.push({
+          a_owner: fx.entry_1_player_name,
+          b_owner: fx.entry_2_player_name,
+          a_team: fx.entry_1_name,
+          b_team: fx.entry_2_name,
+          a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
+          b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null
+        });
       }
-      if (fixtures.length) return fixtures;
-    } catch (e) {
-      console.log("FPL H2H fixtures fetch failed:", e?.response?.status || "", e?.message || e);
+
+      const hasNext =
+        Boolean(data?.has_next) ||
+        Boolean(data?.standings?.has_next) ||
+        Boolean(data?.matches?.has_next) ||
+        false;
+
+      if (!hasNext) break;
+      page += 1;
+      if (page > 50) break; // safety
+      if (RATE_LIMIT_MS > 0) await sleep(RATE_LIMIT_MS);
     }
+
+    if (fixtures.length) return fixtures;
+  } catch (e) {
+    console.log("FPL H2H fixtures fetch failed:", e?.response?.status || "", e?.message || e);
   }
 
   return [];
 }
+
 
 function normalizeFixture(fx) {
   const aOwner = fx.home_owner || fx.a_owner || fx.owner_a || fx.owner1 || fx.home_manager;

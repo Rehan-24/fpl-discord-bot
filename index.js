@@ -496,14 +496,17 @@ async function fetchRenderedHtml(url) {
 
   let html = null;
 
-  // 1) try plain HTTP (SSR or prerender) with retry/backoff
+  //
+  // 1) Try plain HTTP (SSR / prerender) with retry & backoff
+  //
   try {
     const { data } = await getWithRetries(url, {
       timeout: 20000,
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept":
+          "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
@@ -514,7 +517,10 @@ async function fetchRenderedHtml(url) {
     });
 
     html = String(data || "");
-    const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
+
+    const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(
+      html
+    );
     const looksLikeShell =
       html.length < 2000 ||
       />\s*Loading\s*</i.test(html) ||
@@ -533,7 +539,9 @@ async function fetchRenderedHtml(url) {
     debugLog("fetchRenderedHtml:plain:error", e?.message || e);
   }
 
-  // 2) dynamic render w/ Puppeteer (best fidelity)
+  //
+  // 2) Puppeteer fallback (best fidelity, optional)
+  //
   if (HAS_PUPPETEER) {
     debugLog("fetchRenderedHtml:puppeteer:enabled");
     const puppeteer = require("puppeteer");
@@ -541,6 +549,7 @@ async function fetchRenderedHtml(url) {
       headless: "new",
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
+
     try {
       const page = await browser.newPage();
 
@@ -553,30 +562,41 @@ async function fetchRenderedHtml(url) {
         timeout: 20000,
       });
 
-      // try to smash cookie/consent banners, etc.
+      // Try to dismiss consent / cookie banners
       await page.waitForTimeout(500);
       try {
-        const btns = await page.$$("button, [role=button], [class*=consent], [id*=consent]");
+        const btns = await page.$$(
+          "button, [role=button], [class*=consent], [id*=consent]"
+        );
         for (const b of btns) {
-          const txt = (await page.evaluate(el => el.innerText || "", b)).trim().toLowerCase();
+          const txt = (
+            await page.evaluate((el) => el.innerText || "", b)
+          )
+            .trim()
+            .toLowerCase();
           if (/accept|agree|allow all|consent/.test(txt)) {
-            await b.click().catch(()=>{});
+            await b.click().catch(() => {});
             await page.waitForTimeout(400);
             break;
           }
         }
       } catch (_) {}
 
-      // wait for meaningful content
-      await page.waitForFunction(
-        () => {
-          const body = document.body?.innerText || "";
-          const hasText = body.replace(/\s+/g, " ").length > 2000;
-          const hasArticle = !!document.querySelector("article, main");
-          return hasText && hasArticle;
-        },
-        { timeout: 25000 }
-      ).catch(() => {});
+      // Wait for actual article-like content
+      await page
+        .waitForFunction(
+          () => {
+            const body = document.body?.innerText || "";
+            const hasText =
+              body.replace(/\s+/g, " ").length > 2000;
+            const hasArticle = !!document.querySelector(
+              "article, main"
+            );
+            return hasText && hasArticle;
+          },
+          { timeout: 25000 }
+        )
+        .catch(() => {});
 
       await page.waitForTimeout(500);
 
@@ -597,13 +617,17 @@ async function fetchRenderedHtml(url) {
     debugLog("fetchRenderedHtml:puppeteer:disabled");
   }
 
-  // 3) ultra-light prerender proxy (text only, last resort)
+  //
+  // 3) ultra-light prerender proxy (text-only last resort)
+  //
   try {
     const pageId = url.split("/").pop();
     const proxyUrl = `https://r.jina.ai/https://www.fplmundo.com/${pageId}`;
     debugLog("fetchRenderedHtml:proxy", proxyUrl);
 
-    const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+    const { data: text } = await axios.get(proxyUrl, {
+      timeout: 20000,
+    });
     debugLog("fetchRenderedHtml:proxy:return", {
       len: String(text || "").length,
     });
@@ -616,9 +640,10 @@ async function fetchRenderedHtml(url) {
     debugLog("fetchRenderedHtml:proxy:error", e?.message || e);
   }
 
-  // If everything else failed, return whatever we had from step 1 (may be partial) or empty string
+  // If everything else failed, at least return whatever we got first
   return html || "";
 }
+
 
 
 /** Turn the full page HTML into multiple section-articles.
@@ -1081,7 +1106,6 @@ async function postWeeklyFplMundoArticles() {
       fetchFplMundoArticle(FPL_MUNDO_CHAMP_URL).catch(() => null),
     ]);
 
-    // "GW# Review: <title> (Premier)"
     if (prem) {
       const title = `GW${gw ?? "?"} Review: ${prem.title} (Premier)`;
       try {
@@ -1097,7 +1121,6 @@ async function postWeeklyFplMundoArticles() {
       }
     }
 
-    // "GW# Review: <title> (Championship)"
     if (champ) {
       const title = `GW${gw ?? "?"} Review: ${champ.title} (Championship)`;
       try {
@@ -1118,6 +1141,7 @@ async function postWeeklyFplMundoArticles() {
     console.log("[FPL Mundo Weekly] job error:", e?.message || e);
   }
 }
+
 
 
 // Config for list mode

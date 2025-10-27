@@ -3189,7 +3189,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
     // NEW: /price_predictions
-  if (cmd === "price_predictions") {
+  if (interaction.commandName === "price_predictions") {
     try {
       // Acknowledge first so Discord doesn't time out
       await interaction.deferReply({ ephemeral: true });

@@ -76,7 +76,10 @@ async function warmUpFplAndGetCookies() {
  * getWithRetries(url, opts)
  * opts: { headers, timeout, params, referer, origin, useFplWarmup }
  */
-async function getWithRetries(url, { headers = {}, timeout = 15000, params, referer, origin, useFplWarmup } = {}) {
+async function getWithRetries(
+  url,
+  { headers = {}, timeout = 15000, params, referer, origin, useFplWarmup } = {}
+) {
   let lastErr;
   let cachedCookie = ""; // we only warm up once per call-chain
 
@@ -92,36 +95,89 @@ async function getWithRetries(url, { headers = {}, timeout = 15000, params, refe
         timeout,
         params,
         ...keepAliveAgent,
+        // VERY IMPORTANT: do not reject non-2xx here.
+        validateStatus: () => true,
       });
-      return res;
-    } catch (e) {
-      const status = e?.response?.status;
-      const msg = e?.message || String(e);
+
+      // Manually check status so we can decide retry vs throw
+      if (res.status >= 200 && res.status < 400) {
+        return {
+          data: res.data,
+          status: res.status,
+          headers: res.headers,
+        };
+      }
+
+      const status = res.status;
+      const msg = `HTTP ${status} ${url}`;
       const retryable = status ? RETRYABLE.has(status) : true;
 
-      // One-time warm-up if 503/429/5xx and caller asked for it
+      // warm-up cookie if allowed
       if (!cachedCookie && useFplWarmup && retryable) {
         cachedCookie = await warmUpFplAndGetCookies();
       }
 
       if (attempt < MAX_RETRIES && retryable) {
         let delay = BASE_DELAY_MS * Math.pow(2, attempt);
+
+        const ra = res.headers?.["retry-after"];
+        if (ra) {
+          const sec = Number(ra);
+          if (!Number.isNaN(sec) && sec > 0) {
+            delay = Math.max(delay, sec * 1000);
+          }
+        }
+
+        delay = jitter(delay);
+
+        console.log(
+          `[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}); waiting ${delay}ms`
+        );
+
+        await sleep(delay);
+        lastErr = new Error(msg);
+        continue;
+      }
+
+      throw new Error(msg);
+    } catch (e) {
+      const status = e?.response?.status;
+      const msg = e?.message || String(e);
+      const retryable = status ? RETRYABLE.has(status) : true;
+
+      if (!cachedCookie && useFplWarmup && retryable) {
+        cachedCookie = await warmUpFplAndGetCookies();
+      }
+
+      if (attempt < MAX_RETRIES && retryable) {
+        let delay = BASE_DELAY_MS * Math.pow(2, attempt);
+
         const ra = e?.response?.headers?.["retry-after"];
         if (ra) {
           const sec = Number(ra);
-          if (!Number.isNaN(sec) && sec > 0) delay = Math.max(delay, sec * 1000);
+          if (!Number.isNaN(sec) && sec > 0) {
+            delay = Math.max(delay, sec * 1000);
+          }
         }
+
         delay = jitter(delay);
-        console.log(`[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`);
+
+        console.log(
+          `[retry ${attempt + 1}/${MAX_RETRIES}] GET ${url} failed (${status || "no-status"}: ${msg}); waiting ${delay}ms`
+        );
+
         await sleep(delay);
         lastErr = e;
         continue;
       }
+
       throw e;
     }
   }
+
   throw lastErr || new Error(`Failed to GET ${url}`);
 }
+
 
 // ===== FPL Mundo scraping config =====
 // --- DEBUG ---
@@ -435,33 +491,49 @@ function absUrl(href, base) {
     return null;
   }
 }
-
 async function fetchRenderedHtml(url) {
   debugLog("fetchRenderedHtml:start", url);
 
-  // 1) try plain HTTP (SSR or prerender)
+  let html = null;
+
+  // 1) try plain HTTP (SSR or prerender) with retry/backoff
   try {
-    const res = await axios.get(url, {
+    const { data } = await getWithRetries(url, {
       timeout: 20000,
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.fplmundo.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
       },
-      transformResponse: [r => r],
-      validateStatus: s => s >= 200 && s < 400,
+      referer: "https://www.fplmundo.com/",
+      origin: "https://www.fplmundo.com",
+      useFplWarmup: false,
     });
-    const html = String(res.data || "");
+
+    html = String(data || "");
     const looksLikeChallenge = /just a moment|cloudflare|cf-browser-verification|__cf_chl/i.test(html);
-    const looksLikeShell = html.length < 2000 || />\s*Loading\s*<|id="__next"[^>]*>\s*<\/div>/i.test(html);
-    debugLog("fetchRenderedHtml:plain", { len: html.length, looksLikeChallenge, looksLikeShell });
-    if (!looksLikeChallenge && !looksLikeShell) return html;
+    const looksLikeShell =
+      html.length < 2000 ||
+      />\s*Loading\s*</i.test(html) ||
+      /id="__next"[^>]*>\s*<\/div>/i.test(html);
+
+    debugLog("fetchRenderedHtml:plain", {
+      len: html.length,
+      looksLikeChallenge,
+      looksLikeShell,
+    });
+
+    if (!looksLikeChallenge && !looksLikeShell) {
+      return html;
+    }
   } catch (e) {
     debugLog("fetchRenderedHtml:plain:error", e?.message || e);
   }
 
-  // 2) dynamic render w/ Puppeteer
+  // 2) dynamic render w/ Puppeteer (best fidelity)
   if (HAS_PUPPETEER) {
     debugLog("fetchRenderedHtml:puppeteer:enabled");
     const puppeteer = require("puppeteer");
@@ -471,50 +543,83 @@ async function fetchRenderedHtml(url) {
     });
     try {
       const page = await browser.newPage();
-      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-      debugLog("fetchRenderedHtml:puppeteer:navigated");
 
-      const candidates = ['button', 'a[role="button"]', '[id*="accept"]', '[id*="agree"]', '[aria-label*="accept"]', '[data-testid*="accept"]'];
-      for (const sel of candidates) {
-        const handles = await page.$$(sel);
-        for (const h of handles) {
-          const txt = (await (await h.getProperty("innerText")).jsonValue() || "").toString().trim().toLowerCase();
-          if (/(accept|agree|allow all|got it|ok)/i.test(txt)) {
-            debugLog("fetchRenderedHtml:puppeteer:clickedConsent", txt);
-            await h.click().catch(()=>{});
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      );
+
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+      });
+
+      // try to smash cookie/consent banners, etc.
+      await page.waitForTimeout(500);
+      try {
+        const btns = await page.$$("button, [role=button], [class*=consent], [id*=consent]");
+        for (const b of btns) {
+          const txt = (await page.evaluate(el => el.innerText || "", b)).trim().toLowerCase();
+          if (/accept|agree|allow all|consent/.test(txt)) {
+            await b.click().catch(()=>{});
             await page.waitForTimeout(400);
             break;
           }
         }
-      }
+      } catch (_) {}
 
+      // wait for meaningful content
       await page.waitForFunction(
-        () => document && document.body && document.body.innerText && document.body.innerText.length > 2000,
+        () => {
+          const body = document.body?.innerText || "";
+          const hasText = body.replace(/\s+/g, " ").length > 2000;
+          const hasArticle = !!document.querySelector("article, main");
+          return hasText && hasArticle;
+        },
         { timeout: 25000 }
-      ).catch(()=>{ debugLog("fetchRenderedHtml:puppeteer:waitForFunction:timeout"); });
+      ).catch(() => {});
 
-      const html = await page.content();
-      debugLog("fetchRenderedHtml:puppeteer:return", { len: html?.length || 0 });
-      return html;
+      await page.waitForTimeout(500);
+
+      const fullHtml = await page.content();
+      debugLog("fetchRenderedHtml:puppeteer:return", {
+        len: fullHtml?.length || 0,
+      });
+
+      if (fullHtml) {
+        return fullHtml;
+      }
     } catch (e) {
       debugLog("fetchRenderedHtml:puppeteer:error", e?.message || e);
     } finally {
-      await browser.close().catch(()=>{});
+      await browser.close().catch(() => {});
     }
   } else {
     debugLog("fetchRenderedHtml:puppeteer:disabled");
   }
 
-  // 3) ultra-light prerender proxy (text only)
-  const proxyUrl = `https://r.jina.ai/https://www.fplmundo.com/${url.split("/").pop()}`;
-  debugLog("fetchRenderedHtml:proxy", proxyUrl);
+  // 3) ultra-light prerender proxy (text only, last resort)
+  try {
+    const pageId = url.split("/").pop();
+    const proxyUrl = `https://r.jina.ai/https://www.fplmundo.com/${pageId}`;
+    debugLog("fetchRenderedHtml:proxy", proxyUrl);
 
-  const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
-  debugLog("fetchRenderedHtml:proxy:return", { len: String(text || "").length });
+    const { data: text } = await axios.get(proxyUrl, { timeout: 20000 });
+    debugLog("fetchRenderedHtml:proxy:return", {
+      len: String(text || "").length,
+    });
 
-  return `<html><body><main>${String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/\n/g,"<br/>")}</main></body></html>`;
+    return `<html><body><main>${String(text || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/\n/g, "<br/>")}</main></body></html>`;
+  } catch (e) {
+    debugLog("fetchRenderedHtml:proxy:error", e?.message || e);
+  }
+
+  // If everything else failed, return whatever we had from step 1 (may be partial) or empty string
+  return html || "";
 }
+
 
 /** Turn the full page HTML into multiple section-articles.
  *  Strategy:
@@ -968,38 +1073,52 @@ function schedulePredictedFixedTimesPT(channel, times = (process.env.PREDICTED_L
 
 // Post both Premier & Championship weekly FPL Mundo articles
 async function postWeeklyFplMundoArticles() {
-  const gw = await getLatestFinishedGwNumber();
+  try {
+    const gw = await getLatestFinishedGwNumber();
 
-  const [prem, champ] = await Promise.all([
-    fetchFplMundoArticle(FPL_MUNDO_PREMIER_URL).catch(() => null),
-    fetchFplMundoArticle(FPL_MUNDO_CHAMP_URL).catch(() => null),
-  ]);
+    const [prem, champ] = await Promise.all([
+      fetchFplMundoArticle(FPL_MUNDO_PREMIER_URL).catch(() => null),
+      fetchFplMundoArticle(FPL_MUNDO_CHAMP_URL).catch(() => null),
+    ]);
 
-  // Title shape: "GW# Review: <FPL Mundo Title> (Premier/Championship)"
-  if (prem) {
-    const title = `GW${gw ?? "?"} Review: ${prem.title} (Premier)`;
-    await postNews({
-      title,
-      excerpt: prem.excerpt,
-      image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
-      content_markdown: prem.markdown,
-      tags: [FPL_MUNDO_TAG],
-    }).catch(e => console.log("postNews (prem) failed:", e?.message || e));
+    // "GW# Review: <title> (Premier)"
+    if (prem) {
+      const title = `GW${gw ?? "?"} Review: ${prem.title} (Premier)`;
+      try {
+        await postNews({
+          title,
+          excerpt: prem.excerpt,
+          image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
+          content_markdown: prem.markdown,
+          tags: [FPL_MUNDO_TAG],
+        });
+      } catch (e) {
+        console.log("postNews (prem) failed:", e?.message || e);
+      }
+    }
+
+    // "GW# Review: <title> (Championship)"
+    if (champ) {
+      const title = `GW${gw ?? "?"} Review: ${champ.title} (Championship)`;
+      try {
+        await postNews({
+          title,
+          excerpt: champ.excerpt,
+          image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
+          content_markdown: champ.markdown,
+          tags: [FPL_MUNDO_TAG],
+        });
+      } catch (e) {
+        console.log("postNews (champ) failed:", e?.message || e);
+      }
+    }
+
+    console.log("FPL Mundo weekly posts completed.");
+  } catch (e) {
+    console.log("[FPL Mundo Weekly] job error:", e?.message || e);
   }
-
-  if (champ) {
-    const title = `GW${gw ?? "?"} Review: ${champ.title} (Championship)`;
-    await postNews({
-      title,
-      excerpt: champ.excerpt,
-      image_url: FPL_MUNDO_PLACEHOLDER_IMAGE,
-      content_markdown: champ.markdown,
-      tags: [FPL_MUNDO_TAG],
-    }).catch(e => console.log("postNews (champ) failed:", e?.message || e));
-  }
-
-  console.log("FPL Mundo weekly posts completed.");
 }
+
 
 // Config for list mode
 const MUNDO_MAX_LINKS = parseInt(process.env.MUNDO_MAX_LINKS || "4", 10);

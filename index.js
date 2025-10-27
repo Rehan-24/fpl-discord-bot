@@ -985,108 +985,89 @@ function msUntilNextWeekly(weekday /*0-6*/, hour, minute, tz) {
   const realTarget = new Date(target.getTime() - offset);
   return Math.max(0, realTarget.getTime() - now.getTime());
 }
-
 function scheduleWeeklyInTz(name, dow, hour, minute, tz, jobFn) {
-  // helper: compute millis until next run in the target timezone
+  // helper to compute ms until the next scheduled run in the given tz
   function msUntilNextRun() {
     const now = new Date();
 
-    // We construct a Date in the target timezone for "this week's target day/time",
-    // then if it's in the past we roll forward 7 days.
-    const nowTz = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      weekday: "short",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(now);
+    // We’ll compute the next occurrence of (dow, hour, minute) in the target tz.
+    // We do this by scanning up to 7 days ahead in that tz.
 
-    // Build a map like {year:'2025', month:'10', day:'27', weekday:'Mon', hour:'07', minute:'00'}
-    const parts = {};
-    for (const p of nowTz) {
-      if (p.type !== "literal") parts[p.type] = p.value;
+    const weekdayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+    function getTzParts(d) {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        weekday: "short",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).formatToParts(d);
+      const out = {};
+      for (const p of parts) {
+        if (p.type !== "literal") out[p.type] = p.value;
+      }
+      return out;
     }
 
-    // We need the next <dow, hour, minute> in tz.
-    // We'll iterate day offsets 0..7, stopping at the first that matches desired weekday.
-    // We'll then build a Date for that target in *that tz*, then convert to a real UTC Date.
-    function getNextTargetDate() {
-      // convert weekday number -> name
-      // dow is 0=Sunday...6=Saturday in our code; Intl gives strings like 'Mon'.
-      const weekdayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-
+    function nextTargetDate() {
       for (let addDays = 0; addDays < 8; addDays++) {
-        // Compute candidate day-in-tz by adding addDays
         const cand = new Date(now.getTime() + addDays * 24 * 60 * 60 * 1000);
-
-        const candParts = new Intl.DateTimeFormat("en-US", {
-          timeZone: tz,
-          weekday: "short",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-        }).formatToParts(cand);
-
-        const cMap = {};
-        for (const p of candParts) {
-          if (p.type !== "literal") cMap[p.type] = p.value;
-        }
+        const cMap = getTzParts(cand);
 
         if (cMap.weekday === weekdayNames[dow]) {
-          // we found the weekday we care about. set target h/m.
-          const y = Number(cMap.year);
-          const m = Number(cMap.month) - 1; // JS Date month 0-11
-          const d = Number(cMap.day);
+          // construct target local datetime in tz: year-month-day hour:minute:00
+          const y = cMap.year;
+          const m = cMap.month;
+          const d = cMap.day;
 
-          // We now create a Date AS IF that tz's y-m-d hour:minute were local in that tz,
-          // by using Intl to get the UTC equivalent.
-          const targetLocalString = `${cMap.year}-${cMap.month}-${cMap.day}T${
-            String(hour).padStart(2, "0")
-          }:${String(minute).padStart(2, "0")}:00`;
+          const hh = String(hour).padStart(2, "0");
+          const mm = String(minute).padStart(2, "0");
 
-          // Interpret that time in tz, convert to actual JS Date in UTC:
-          const targetUtcMs = Date.parse(
-            new Date(
-              new Intl.DateTimeFormat("en-US", {
-                timeZone: tz,
-                year: "numeric",
-                month: "2-digit",
-                day: "2-digit",
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-                hour12: false,
-              }).format(
-                new Date(`${targetLocalString}Z`) // seed; overridden below
-              )
-            )
-          );
+          // naive "local" timestamp string
+          const localStamp = `${y}-${m}-${d}T${hh}:${mm}:00`;
 
-          // Fallback simpler approach:
-          // We'll just construct a Date with current UTC, then adjust by diff between now-in-tz and now-in-UTC.
-          // If above block confuses you or yields NaN in your runtime, replace it with a naive version:
-          if (Number.isNaN(targetUtcMs)) {
-            // naive fallback: schedule 1 minute from now
-            return new Date(Date.now() + 60_000);
+          // We now interpret that as "time in tz", and we need a Date in UTC.
+          // We'll ask Intl for that same components *as seen in tz*, then feed it back.
+          // If this ever fails, we'll just run 1 minute from now as fallback.
+
+          let targetMs = NaN;
+          try {
+            // We try to get a Date by forcing a format in tz and parsing back.
+            // JS doesn't give direct tz-based construction so we use this heuristic:
+            const probe = new Date(localStamp + "Z");
+            const checkParts = getTzParts(probe);
+            // overwrite with our intended hh:mm because probe's hh/mm may differ
+            checkParts.hour = hh;
+            checkParts.minute = mm;
+            checkParts.second = "00";
+            // rebuild an ISO-ish string using those pieces in UTC
+            const isoGuess = `${checkParts.year}-${checkParts.month}-${checkParts.day}T${checkParts.hour}:${checkParts.minute}:${checkParts.second}Z`;
+            targetMs = Date.parse(isoGuess);
+          } catch (_) {
+            /* ignore, fallback below */
           }
 
-          return new Date(targetUtcMs);
+          if (!Number.isNaN(targetMs)) {
+            return new Date(targetMs);
+          }
+
+          // fallback: 1 minute from now so we don't NaN out
+          return new Date(Date.now() + 60_000);
         }
       }
 
-      // shouldn't get here, fallback to 1 minute
+      // fallback: 1 minute from now
       return new Date(Date.now() + 60_000);
     }
 
-    const target = getNextTargetDate();
+    const target = nextTargetDate();
 
-    // if target <= now, push 7 days
+    // if target already passed, add 7 days
     if (target.getTime() <= now.getTime()) {
       target.setTime(target.getTime() + 7 * 24 * 60 * 60 * 1000);
     }
@@ -1100,16 +1081,19 @@ function scheduleWeeklyInTz(name, dow, hour, minute, tz, jobFn) {
     } catch (e) {
       console.log(`[${name}] job error:`, e?.message || e);
     } finally {
-      // after running, schedule the next one a week later
+      // schedule the next run in 7 days
       const weekMs = 7 * 24 * 60 * 60 * 1000;
       setTimeout(runAndResched, weekMs);
-      console.log(`[${name}] next run in ${Math.round(weekMs / 60000)} min`);
+      console.log(
+        `[${name}] next run in ${Math.round(weekMs / 60000)} min`
+      );
     }
   }
 
-  // SCHEDULING STRATEGY:
-  // DO NOT RUN jobFn() immediately at boot.
-  // Instead, compute ms until first occurrence and schedule it.
+  // IMPORTANT:
+  // We DO NOT run jobFn() immediately at startup anymore.
+  // We only schedule its first timed run.
+
   const delayMs = msUntilNextRun();
   console.log(
     `[${name}] next run in ${Math.round(delayMs / 60000)} min`
@@ -1117,6 +1101,7 @@ function scheduleWeeklyInTz(name, dow, hour, minute, tz, jobFn) {
 
   setTimeout(runAndResched, delayMs);
 }
+
 
 
 // ---- DAILY scheduler in a specific TZ (DST-safe) ----
@@ -3204,10 +3189,44 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
     // NEW: /price_predictions
-  if (interaction.commandName === "price_predictions") {
-    await handlePricePredictionsCmd(interaction);
+  if (cmd === "price_predictions") {
+    try {
+      // Acknowledge first so Discord doesn't time out
+      await interaction.deferReply({ ephemeral: true });
+
+      // This MUST be the hardened version that calls getWithRetries()
+      const { risers, fallers } = await fetchPredictedFromLiveFPL();
+
+      const msg = buildPredictedMessage(risers, fallers);
+
+      await interaction.editReply({
+        content: msg || "No predicted price movements available right now.",
+      });
+    } catch (e) {
+      console.log("predictions slash error:", e?.message || e);
+
+      // We still MUST respond to the interaction if we haven't already
+      try {
+        if (interaction.deferred) {
+          await interaction.editReply({
+            content:
+              "Couldn't fetch predicted price risers/fallers (source rate limited / 503). Try again later.",
+          });
+        } else {
+          await interaction.reply({
+            ephemeral: true,
+            content:
+              "Couldn't fetch predicted price risers/fallers (source rate limited / 503). Try again later.",
+          });
+        }
+      } catch (_) {
+        // swallow so we don't throw out of the handler
+      }
+    }
+
     return;
   }
+
 
   // NEW: /price_changes
   if (interaction.commandName === "price_changes") {

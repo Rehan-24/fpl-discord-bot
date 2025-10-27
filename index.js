@@ -2563,7 +2563,7 @@ async function scheduleDeadlineReminders() {
 
   clearReminders();
 
-  // Rest of your existing scheduling logic...
+  // Helper that generates & posts previews
   const runPreviews = async (label) => {
     logPreviewDebug(`runPreviews start (${label}) for GW${ev.id}`);
 
@@ -2619,7 +2619,7 @@ async function scheduleDeadlineReminders() {
     }
   };
 
-  // Schedule reminders with the same logic as before
+  // Schedule reminders
   const scheduleAt = (when, label, fn) => {
     const ms = when.getTime() - Date.now();
     if (ms <= 0) return;
@@ -2650,44 +2650,6 @@ async function scheduleDeadlineReminders() {
   __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
 
   console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
-}
-
-// ---------- schedule the reminders ----------
-const scheduleAt = (when, label, fn) => {
-  const ms = when.getTime() - Date.now();
-  if (ms <= 0) return; // too late to schedule
-  const t = setTimeout(async () => {
-    try {
-      const pst = formatInTZ(deadline, "America/Los_Angeles");
-      const est = formatInTZ(deadline, "America/New_York");
-      await channel.send(`🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`);
-      if (typeof fn === "function") await fn();
-    } catch (e) {
-      console.error("Failed to send reminder:", e?.message || e);
-    }
-  }, ms);
-  __scheduledTimeouts.push(t);
-};
-
-// T-24h: schedule if we’re earlier than that mark…
-scheduleAt(oneDayBefore, "24-hour", async () => { await runPreviews("T-24h"); });
-
-// …and if we’re already inside the 24h window (common after restarts), run a catch-up once.
-const now = Date.now();
-if (now > oneDayBefore.getTime() && now < oneHourBefore.getTime()) {
-  logPreviewDebug("inside 24h window at (re)schedule time — running catch-up previews now");
-  await runPreviews("catch-up");
-}
-
-// T-1h reminder (unchanged)
-scheduleAt(oneHourBefore, "1-hour");
-
-// re-arm for next GW after this deadline
-const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
-__scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
-
-console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
-
 }
 
 // ===== Price Change Watchers (LiveFPL predicted + confirmed) =====
@@ -2807,10 +2769,21 @@ let __TEAM_MAP_CACHE = null;
 async function fetchFplTeamMap() {
   if (__TEAM_MAP_CACHE) return __TEAM_MAP_CACHE;
 
-  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/", {
-    timeout: 20000,
-    headers: { "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)" }
-  });
+  // Use getWithRetries instead of raw axios
+  const { data } = await getWithRetries(
+    "https://fantasy.premierleague.com/api/bootstrap-static/",
+    {
+      timeout: 20000,
+      headers: {
+        "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.8",
+      },
+      referer: "https://fantasy.premierleague.com/",
+      origin: "https://fantasy.premierleague.com",
+      useFplWarmup: true, // CRITICAL
+    }
+  );
 
   const teams = {};
   for (const t of (data?.teams || [])) {

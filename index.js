@@ -240,6 +240,10 @@ async function safeDefer(interaction, opts = { ephemeral: false }) {
 
 // ===== CONFIG =====
 const BASE = "https://tfpl.onrender.com/api".replace(/\/+$/, "");
+// RELAY_BASE: internal proxy you run on your droplet.
+// Example env on Railway: RELAY_BASE=http://209.97.xxx.xxx:3000
+const RELAY_BASE = (process.env.RELAY_BASE || "").replace(/\/+$/, "");
+
 if (!BASE) throw new Error("BACKEND_URL not set");
 const API_HEADERS = {};
 if (process.env.API_KEY) API_HEADERS["X-Api-Key"] = process.env.API_KEY;
@@ -1559,14 +1563,24 @@ async function fetchFplH2HStandingsAllPages(leagueId) {
 }
 
 // Try multiple endpoints to fetch league tables; return [] on failure
+// Try multiple endpoints to fetch league tables; return [] on failure
 async function fetchLeagueTable(league) {
   const urls = [];
   const envKey = `LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`;
 
+  // 1. If caller gave us a custom endpoint via env (per-league override)
   if (process.env[envKey]) {
     urls.push(process.env[envKey]);
   }
 
+  // 2. If relay is configured, hit relay first.
+  if (RELAY_BASE) {
+    const FPL_IDS = { premier: "723566", championship: "850022" };
+    const leagueId = FPL_IDS[league] || league;
+    urls.push(`${RELAY_BASE}/standings?league=${leagueId}`);
+  }
+
+  // 3. Then fall back to our own APIs / site APIs
   urls.push(
     `${BASE}/standings?league=${league}`,
     `${BASE}/league/${league}`,
@@ -1576,15 +1590,9 @@ async function fetchLeagueTable(league) {
 
   for (const u of urls) {
     try {
-      // CRITICAL: Use getWithRetries for FPL H2H endpoints
-      if (/fantasy\.premierleague\.com\/api\/leagues-h2h\/\d+\/standings/i.test(u)) {
-        const leagueId = (u.match(/leagues-h2h\/(\d+)\/standings/i) || [])[1];
-        if (leagueId) {
-          await respectFplRateLimit(); // CRITICAL
-          const all = await fetchFplH2HStandingsAllPages(leagueId);
-          if (all.length) return all;
-        }
-      }
+      // We used to special-case FPL direct here. With the relay approach,
+      // we should *not* be calling fantasy.premierleague.com from Railway
+      // at all anymore, so we can skip that branch.
 
       const { data } = await axios.get(u, { timeout: 15000 });
 
@@ -1597,11 +1605,13 @@ async function fetchLeagueTable(league) {
 
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
-      // try next URL
+      console.log("fetchLeagueTable url failed", u, e?.response?.status || e.message);
     }
   }
+
   return [];
 }
+
 
 
 // Basic normalize to known fields
@@ -1827,6 +1837,51 @@ const DEFAULT_FPL_H2H_IDS = { premier: "723566", championship: "850022" };
 async function fetchFixtures(league, gw) {
   const https = require("https");
   const http = require("http");
+  // Relay fast-path:
+  // If RELAY_BASE is set, we just ask the relay for fixtures
+  // and adapt the shape to what the rest of the bot expects.
+  if (RELAY_BASE) {
+    // map friendly league ("premier") to actual FPL league ID
+    const FPL_IDS = { premier: "723566", championship: "850022" };
+    const leagueId = FPL_IDS[league] || league;
+
+    try {
+      const relayUrl = `${RELAY_BASE}/fixtures?league=${leagueId}&gw=${gw}&page=1`;
+      const resp = await axios.get(relayUrl, { timeout: 15000 });
+
+      if (resp.data && resp.data.ok) {
+        const raw = resp.data.data?.results
+          || resp.data.data?.matches
+          || resp.data.data?.fixtures
+          || resp.data.data
+          || [];
+
+        // Normalize to the same internal shape your code later expects:
+        // You were eventually pushing fixtures like:
+        // {
+        //   a_owner: fx.entry_1_player_name,
+        //   b_owner: fx.entry_2_player_name,
+        //   a_team:  fx.entry_1_name,
+        //   b_team:  fx.entry_2_name,
+        // }
+        const cleaned = Array.isArray(raw) ? raw.map(fx => ({
+          a_owner: fx.entry_1_player_name,
+          b_owner: fx.entry_2_player_name,
+          a_team:  fx.entry_1_name,
+          b_team:  fx.entry_2_name,
+        })) : [];
+
+        return cleaned;
+      }
+
+      // If relay responded but structure looked weird, fall through to legacy path
+      console.log("relay fixtures shape unexpected, falling back");
+    } catch (err) {
+      console.log("relay fixtures failed, falling back", err.message);
+      // If relay is down or blocked or whatever, we continue into the old logic below
+    }
+  }
+
 
   // ----- Tunables -----
   const MAX_RETRIES = Number(process.env.HTTP_MAX_RETRIES || 4);

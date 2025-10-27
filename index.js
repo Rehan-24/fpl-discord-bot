@@ -2487,37 +2487,10 @@ async function publishFromMundoPage(url, { mode="auto", max=4, tag=FPL_MUNDO_TAG
 
 async function scheduleDeadlineReminders() {
   if (!REMINDER_CHANNEL_ID) {
-    console.log("DEADLINE_CHANNEL_ID not set — skipping deadline reminders.");
-    return;
-  }
-
-  // Fetch channel
-  let channel;
-  try {
-    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
-  } catch (e) {
-    console.log("Unable to fetch reminder channel:", e?.message || e);
-    return;
-  }
-
-// Next event (deadline)
-const ev = await getNextFplEvent();
-if (!ev) { console.log("No upcoming FPL event found to schedule."); return; }
-
-const deadline = new Date(ev.deadline_time); // UTC from FPL API
-const oneDayBefore  = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
-const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
-
-clearReminders();
-
-// ---------- helper that actually generates & posts previews ----------
-async function scheduleDeadlineReminders() {
-  if (!REMINDER_CHANNEL_ID) {
     console.log("DEADLINE_CHANNEL_ID not set – skipping deadline reminders.");
     return;
   }
 
-  // Fetch channel
   let channel;
   try {
     channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
@@ -2534,25 +2507,20 @@ async function scheduleDeadlineReminders() {
   while (!ev && attempts < maxAttempts) {
     attempts++;
     try {
-      await respectFplRateLimit(); // CRITICAL: respect rate limits
+      await respectFplRateLimit();
       ev = await getNextFplEvent();
       if (!ev) {
         console.log(`Attempt ${attempts}/${maxAttempts}: No upcoming FPL event found.`);
-        if (attempts < maxAttempts) {
-          await sleep(5000); // wait 5s before retry
-        }
+        if (attempts < maxAttempts) await sleep(5000);
       }
     } catch (e) {
       console.log(`Attempt ${attempts}/${maxAttempts} failed:`, e?.message || e);
-      if (attempts < maxAttempts) {
-        await sleep(5000 * attempts); // exponential backoff
-      }
+      if (attempts < maxAttempts) await sleep(5000 * attempts);
     }
   }
   
   if (!ev) {
     console.log("Failed to get upcoming FPL event after retries – will retry in 1 hour");
-    // Schedule retry in 1 hour instead of crashing
     setTimeout(scheduleDeadlineReminders, 60 * 60 * 1000);
     return;
   }
@@ -2560,66 +2528,53 @@ async function scheduleDeadlineReminders() {
   const deadline = new Date(ev.deadline_time);
   const oneDayBefore = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
   const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
-
   clearReminders();
 
-  // Helper that generates & posts previews
   const runPreviews = async (label) => {
     logPreviewDebug(`runPreviews start (${label}) for GW${ev.id}`);
-
     const reasons = [];
     const previews = [];
 
     for (const league of LEAGUES) {
       try {
-        await respectFplRateLimit(); // CRITICAL: rate limit between calls
+        await respectFplRateLimit();
         const rows = await fetchLeagueTable(league);
         const teams = normalizeTeams(rows);
         if (!teams.length) {
-          logPreviewDebug(`${league}: no league table data`);
           reasons.push(`${league}: no league table data`);
           continue;
         }
 
-        await respectFplRateLimit(); // CRITICAL: rate limit
+        await respectFplRateLimit();
         const fixtures = await fetchFixtures(league, ev.id);
         if (!fixtures?.length) {
-          logPreviewDebug(`${league}: no fixtures for GW${ev.id}`);
           reasons.push(`${league}: no fixtures`);
           continue;
         }
 
         const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
         if (!picks.length) {
-          logPreviewDebug(`${league}: no picks generated`);
           reasons.push(`${league}: no picks`);
           continue;
         }
 
         rememberPreviews(league, ev.id, picks);
         previews.push(formatPreviewMessage(league, ev.id, picks));
-        logPreviewDebug(`${league}: ok (teams=${teams.length}, fixtures=${fixtures.length}, picks=${picks.length})`);
       } catch (e) {
-        logPreviewDebug(`${league}: error`, e?.message || e);
         reasons.push(`${league}: error - ${e?.message || e}`);
       }
     }
 
     if (previews.length) {
       await channel.send(previews.join("\n\n"));
-      logPreviewDebug(`posted ${previews.length} preview blocks for GW${ev.id} (${label})`);
-    } else {
-      console.log(`[previews] None generated for GW${ev.id} (${label}). Reasons: ${reasons.join("; ")}`);
-      if (PREVIEW_DEBUG_NOTIFY) {
-        await channel.send(
-          `⚠️ Could not generate GW${ev.id} Ones to Watch (${label}).\n` +
-          reasons.map(r => `• ${r}`).join("\n")
-        ).catch(() => {});
-      }
+    } else if (PREVIEW_DEBUG_NOTIFY) {
+      await channel.send(
+        `⚠️ Could not generate GW${ev.id} Ones to Watch (${label}).\n` +
+        reasons.map(r => `• ${r}`).join("\n")
+      ).catch(() => {});
     }
   };
 
-  // Schedule reminders
   const scheduleAt = (when, label, fn) => {
     const ms = when.getTime() - Date.now();
     if (ms <= 0) return;
@@ -2640,7 +2595,6 @@ async function scheduleDeadlineReminders() {
 
   const now = Date.now();
   if (now > oneDayBefore.getTime() && now < oneHourBefore.getTime()) {
-    logPreviewDebug("inside 24h window at (re)schedule time – running catch-up previews now");
     await runPreviews("catch-up");
   }
 
@@ -2649,7 +2603,7 @@ async function scheduleDeadlineReminders() {
   const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
   __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
 
-  console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
+  console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}`);
 }
 
 // ===== Price Change Watchers (LiveFPL predicted + confirmed) =====

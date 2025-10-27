@@ -1905,9 +1905,25 @@ async function maybePostPrevGwSummaries() {
   }
 
   // Fetch FPL events
-  let bs;
+   let bs;
   try {
-    const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+    const { data } = await getWithRetries(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      {
+        timeout: 15000,
+        headers: {
+          "Accept": "application/json, text/plain, */*",
+          "User-Agent": process.env.FPL_USER_AGENT ||
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.8",
+        },
+        // This is the magic sauce for FPL: pretend we're coming from their site,
+        // warm up once to grab cookies, and retry 503/429 gracefully.
+        referer: "https://fantasy.premierleague.com/",
+        origin:  "https://fantasy.premierleague.com",
+        useFplWarmup: true,
+      }
+    );
     bs = data;
   } catch (e) {
     console.log("maybePostPrevGwSummaries: bootstrap fetch failed", e?.message || e);
@@ -2492,22 +2508,33 @@ function parseSummaryFromLiveFPL(html) {
 // ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
 async function fetchPredictedFromLiveFPL() {
   const url = "https://www.livefpl.net/prices";
-  const { data: html } = await axios.get(url, {
+
+  // use our retrying wrapper instead of raw axios.get
+  const { data: html } = await getWithRetries(url, {
     timeout: 20000,
     headers: {
-      // a friendly UA helps some hosts serve full HTML to bots
-      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)"
-    }
+      // pretend to be a real browser-ish client, plus our bot UA
+      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
+      "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
+    },
+    // livefpl.net doesn't care about FPL cookies, so no warmup
+    useFplWarmup: false,
+    referer: "https://www.livefpl.net/prices",
+    origin:  "https://www.livefpl.net",
   });
 
-  const cards = parseSummaryFromLiveFPL(html);       // [{name, price, progress}]
-  if (!cards.length) return { risers: [], fallers: [] };
+  // still parse like before
+  const cards = parseSummaryFromLiveFPL(html); // [{name, price, progress}]
+  if (!cards.length) {
+    return { risers: [], fallers: [] };
+  }
 
-  // Thresholds:
-  const risersRaw = cards.filter(c => c.progress >= 100);
+  const risersRaw  = cards.filter(c => c.progress >= 100);
   const fallersRaw = cards.filter(c => c.progress <= -100);
 
-  // Enrich with team via FPL bootstrap
   const teamMap = await fetchFplTeamMap();
   const attachTeam = (arr) => arr.map(p => ({
     name: p.name,
@@ -2675,18 +2702,19 @@ function parseConfirmedTable($, $table, meta, teamMap) {
 
 async function fetchConfirmedPriceChanges() {
   const url = "https://plan.livefpl.net/price_changes";
-  const { data: html } = await axios.get(url, {
+
+  const { data: html } = await getWithRetries(url, {
     timeout: 20000,
     headers: {
       "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
       "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
-      "Referer": "https://plan.livefpl.net/",
       "Cache-Control": "no-cache",
       "Pragma": "no-cache",
     },
-    transformResponse: [r => r],
-    validateStatus: s => s >= 200 && s < 400,
+    referer: "https://plan.livefpl.net/",
+    origin:  "https://plan.livefpl.net",
+    useFplWarmup: false,
   });
 
   if (/just a moment/i.test(html) && /cloudflare/i.test(html)) {

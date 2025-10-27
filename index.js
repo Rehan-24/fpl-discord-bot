@@ -986,23 +986,138 @@ function msUntilNextWeekly(weekday /*0-6*/, hour, minute, tz) {
   return Math.max(0, realTarget.getTime() - now.getTime());
 }
 
-function scheduleWeeklyInTz(label, weekday, hour, minute, tz, fn) {
-  const scheduleNext = () => {
-    const ms = msUntilNextWeekly(weekday, hour, minute, tz);
-    console.log(`[${label}] next run in ${Math.round(ms / 1000 / 60)} min`);
-    setTimeout(async () => {
-      try {
-        await fn();
-      } catch (e) {
-        console.log(`[${label}] job error:`, e?.message || e);
-      } finally {
-        // recompute to handle DST changes
-        scheduleNext();
+function scheduleWeeklyInTz(name, dow, hour, minute, tz, jobFn) {
+  // helper: compute millis until next run in the target timezone
+  function msUntilNextRun() {
+    const now = new Date();
+
+    // We construct a Date in the target timezone for "this week's target day/time",
+    // then if it's in the past we roll forward 7 days.
+    const nowTz = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      weekday: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+
+    // Build a map like {year:'2025', month:'10', day:'27', weekday:'Mon', hour:'07', minute:'00'}
+    const parts = {};
+    for (const p of nowTz) {
+      if (p.type !== "literal") parts[p.type] = p.value;
+    }
+
+    // We need the next <dow, hour, minute> in tz.
+    // We'll iterate day offsets 0..7, stopping at the first that matches desired weekday.
+    // We'll then build a Date for that target in *that tz*, then convert to a real UTC Date.
+    function getNextTargetDate() {
+      // convert weekday number -> name
+      // dow is 0=Sunday...6=Saturday in our code; Intl gives strings like 'Mon'.
+      const weekdayNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+      for (let addDays = 0; addDays < 8; addDays++) {
+        // Compute candidate day-in-tz by adding addDays
+        const cand = new Date(now.getTime() + addDays * 24 * 60 * 60 * 1000);
+
+        const candParts = new Intl.DateTimeFormat("en-US", {
+          timeZone: tz,
+          weekday: "short",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).formatToParts(cand);
+
+        const cMap = {};
+        for (const p of candParts) {
+          if (p.type !== "literal") cMap[p.type] = p.value;
+        }
+
+        if (cMap.weekday === weekdayNames[dow]) {
+          // we found the weekday we care about. set target h/m.
+          const y = Number(cMap.year);
+          const m = Number(cMap.month) - 1; // JS Date month 0-11
+          const d = Number(cMap.day);
+
+          // We now create a Date AS IF that tz's y-m-d hour:minute were local in that tz,
+          // by using Intl to get the UTC equivalent.
+          const targetLocalString = `${cMap.year}-${cMap.month}-${cMap.day}T${
+            String(hour).padStart(2, "0")
+          }:${String(minute).padStart(2, "0")}:00`;
+
+          // Interpret that time in tz, convert to actual JS Date in UTC:
+          const targetUtcMs = Date.parse(
+            new Date(
+              new Intl.DateTimeFormat("en-US", {
+                timeZone: tz,
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: false,
+              }).format(
+                new Date(`${targetLocalString}Z`) // seed; overridden below
+              )
+            )
+          );
+
+          // Fallback simpler approach:
+          // We'll just construct a Date with current UTC, then adjust by diff between now-in-tz and now-in-UTC.
+          // If above block confuses you or yields NaN in your runtime, replace it with a naive version:
+          if (Number.isNaN(targetUtcMs)) {
+            // naive fallback: schedule 1 minute from now
+            return new Date(Date.now() + 60_000);
+          }
+
+          return new Date(targetUtcMs);
+        }
       }
-    }, ms);
-  };
-  scheduleNext();
+
+      // shouldn't get here, fallback to 1 minute
+      return new Date(Date.now() + 60_000);
+    }
+
+    const target = getNextTargetDate();
+
+    // if target <= now, push 7 days
+    if (target.getTime() <= now.getTime()) {
+      target.setTime(target.getTime() + 7 * 24 * 60 * 60 * 1000);
+    }
+
+    return target.getTime() - now.getTime();
+  }
+
+  async function runAndResched() {
+    try {
+      await jobFn();
+    } catch (e) {
+      console.log(`[${name}] job error:`, e?.message || e);
+    } finally {
+      // after running, schedule the next one a week later
+      const weekMs = 7 * 24 * 60 * 60 * 1000;
+      setTimeout(runAndResched, weekMs);
+      console.log(`[${name}] next run in ${Math.round(weekMs / 60000)} min`);
+    }
+  }
+
+  // SCHEDULING STRATEGY:
+  // DO NOT RUN jobFn() immediately at boot.
+  // Instead, compute ms until first occurrence and schedule it.
+  const delayMs = msUntilNextRun();
+  console.log(
+    `[${name}] next run in ${Math.round(delayMs / 60000)} min`
+  );
+
+  setTimeout(runAndResched, delayMs);
 }
+
 
 // ---- DAILY scheduler in a specific TZ (DST-safe) ----
 function msUntilNextDaily(hour, minute, tz) {

@@ -11,6 +11,7 @@ const express = require("express");
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+
 // ---- Robust GET with warm-up, cookies, Referer/Origin, backoff ----
 const https = require("https");
 const http = require("http");
@@ -434,7 +435,22 @@ async function refreshManagerDiscordMap() {
 
 // Latest finished GW (prefers most recent finished event)
 async function getLatestFinishedGwNumber() {
-  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+  const { data } = await getWithRetries(
+    "https://fantasy.premierleague.com/api/bootstrap-static/",
+    {
+      timeout: 20000,
+      headers: {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": process.env.FPL_USER_AGENT ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.8",
+      },
+      referer: "https://fantasy.premierleague.com/",
+      origin: "https://fantasy.premierleague.com",
+      useFplWarmup: true, // CRITICAL: warm up to get cookies
+    }
+  );
+  
   const events = data?.events || [];
   const finished = events
     .filter(e => e.is_finished === true || e.finished === true)
@@ -479,6 +495,19 @@ function extractTitleFromHtml(html) {
 }
 
 // ===== Multi-article extraction from a single FPL Mundo page =====
+
+const FPL_RATE_LIMIT_MS = Number(process.env.FPL_RATE_LIMIT_MS || 350);
+let __lastFplCallTime = 0;
+
+async function respectFplRateLimit() {
+  const now = Date.now();
+  const elapsed = now - __lastFplCallTime;
+  if (elapsed < FPL_RATE_LIMIT_MS) {
+    await sleep(FPL_RATE_LIMIT_MS - elapsed);
+  }
+  __lastFplCallTime = Date.now();
+}
+
 const MUNDO_MAX_SECTIONS = parseInt(process.env.MUNDO_MAX_SECTIONS || "4", 10);
 const MUNDO_SECTION_MIN_CHARS = parseInt(process.env.MUNDO_SECTION_MIN_CHARS || "600", 10);
 const MUNDO_DEFAULT_IMAGE = process.env.MUNDO_DEFAULT_IMAGE || FPL_MUNDO_PLACEHOLDER_IMAGE;
@@ -1502,15 +1531,32 @@ async function fetchFplH2HStandingsAllPages(leagueId) {
 
   while (hasNext) {
     const url = `${base}?page=${page}`;
-    const { data } = await axios.get(url, { timeout: 15000 });
+    
+    await respectFplRateLimit(); // CRITICAL: rate limit between pages
+    
+    const { data } = await getWithRetries(url, {
+      timeout: 15000,
+      headers: {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": process.env.FPL_USER_AGENT ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.8",
+      },
+      referer: `https://fantasy.premierleague.com/leagues/${leagueId}/standings`,
+      origin: "https://fantasy.premierleague.com",
+      useFplWarmup: true, // CRITICAL
+    });
+    
     const chunk = data?.standings?.results || [];
     out = out.concat(chunk);
     hasNext = !!data?.standings?.has_next;
     page += 1;
+    
+    // Safety: don't loop forever
+    if (page > 100) break;
   }
-  return out; // array of rows with entry_name, player_name, total, wins/losses/draws, etc.
+  return out;
 }
-
 
 // Try multiple endpoints to fetch league tables; return [] on failure
 async function fetchLeagueTable(league) {
@@ -1519,25 +1565,22 @@ async function fetchLeagueTable(league) {
 
   if (process.env[envKey]) {
     urls.push(process.env[envKey]);
-    console.log("inside if - ", process.env[envKey]);
   }
-  console.log("after if - ", urls);
 
-  // Try backend then site fallbacks
   urls.push(
     `${BASE}/standings?league=${league}`,
     `${BASE}/league/${league}`,
     `${BASE}/${league}`,
     `${SITE_BASE}/api/${league}`
   );
-  console.log("outside if - ", urls);
 
   for (const u of urls) {
     try {
-      // Special-case: direct FPL H2H endpoint(s)
+      // CRITICAL: Use getWithRetries for FPL H2H endpoints
       if (/fantasy\.premierleague\.com\/api\/leagues-h2h\/\d+\/standings/i.test(u)) {
         const leagueId = (u.match(/leagues-h2h\/(\d+)\/standings/i) || [])[1];
         if (leagueId) {
+          await respectFplRateLimit(); // CRITICAL
           const all = await fetchFplH2HStandingsAllPages(leagueId);
           if (all.length) return all;
         }
@@ -1545,15 +1588,13 @@ async function fetchLeagueTable(league) {
 
       const { data } = await axios.get(u, { timeout: 15000 });
 
-      // Unified shape extraction (now includes FPL's shape):
       const arr =
         Array.isArray(data) ? data :
         Array.isArray(data?.rows) ? data.rows :
         Array.isArray(data?.data?.rows) ? data.data.rows :
-        Array.isArray(data?.standings?.results) ? data.standings.results : // <-- FPL H2H
+        Array.isArray(data?.standings?.results) ? data.standings.results :
         (data?.teams || data?.table || []);
 
-      console.log("arr - ", Array.isArray(arr) ? arr.length : typeof arr);
       if (Array.isArray(arr) && arr.length) return arr;
     } catch (e) {
       // try next URL
@@ -1743,7 +1784,22 @@ const REMINDER_CHANNEL_ID = process.env.DEADLINE_CHANNEL_ID;
 const TZ = process.env.TZ || "America/Los_Angeles";
 
 async function getNextFplEvent() {
-  const { data } = await axios.get("https://fantasy.premierleague.com/api/bootstrap-static/");
+  const { data } = await getWithRetries(
+    "https://fantasy.premierleague.com/api/bootstrap-static/",
+    {
+      timeout: 20000,
+      headers: {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": process.env.FPL_USER_AGENT ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.8",
+      },
+      referer: "https://fantasy.premierleague.com/",
+      origin: "https://fantasy.premierleague.com",
+      useFplWarmup: true, // CRITICAL: warm up to get cookies
+    }
+  );
+  
   const now = new Date();
   const events = data?.events || [];
   const upcoming = events
@@ -2455,70 +2511,146 @@ const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
 clearReminders();
 
 // ---------- helper that actually generates & posts previews ----------
-const runPreviews = async (label) => {
-  logPreviewDebug(`runPreviews start (${label}) for GW${ev.id}`);
+async function scheduleDeadlineReminders() {
+  if (!REMINDER_CHANNEL_ID) {
+    console.log("DEADLINE_CHANNEL_ID not set – skipping deadline reminders.");
+    return;
+  }
 
-  const reasons = [];
-  const previews = [];
+  // Fetch channel
+  let channel;
+  try {
+    channel = await client.channels.fetch(REMINDER_CHANNEL_ID);
+  } catch (e) {
+    console.log("Unable to fetch reminder channel:", e?.message || e);
+    return;
+  }
 
-  for (const league of LEAGUES) {
+  // CRITICAL: Retry logic for getting next event
+  let ev = null;
+  let attempts = 0;
+  const maxAttempts = 3;
+  
+  while (!ev && attempts < maxAttempts) {
+    attempts++;
     try {
-      const rows = await fetchLeagueTable(league);
-      const teams = normalizeTeams(rows);
-      if (!teams.length) {
-        logPreviewDebug(`${league}: no league table data`);
-        reasons.push(`${league}: no league table data`);
-        continue;
+      await respectFplRateLimit(); // CRITICAL: respect rate limits
+      ev = await getNextFplEvent();
+      if (!ev) {
+        console.log(`Attempt ${attempts}/${maxAttempts}: No upcoming FPL event found.`);
+        if (attempts < maxAttempts) {
+          await sleep(5000); // wait 5s before retry
+        }
       }
-
-      const fixtures = await fetchFixtures(league, ev.id);
-      if (!fixtures?.length) {
-        logPreviewDebug(`${league}: no fixtures for GW${ev.id}`);
-        reasons.push(`${league}: no fixtures`);
-        continue;
-      }
-
-      console.log("teams sample", teams.slice(0, 3).map(t => ({
-        position: t.position, team: t.team, owner: t.owner, h2hPoints: t.h2hPoints, totalScore: t.totalScore
-      })));
-
-      console.log("fixtures sample", fixtures.slice(0, 3).map(fx => ({
-        aOwner: fx.a_owner || fx.owner_a || fx.entry_1_player_name,
-        aTeam:  fx.a_team  || fx.team_a  || fx.entry_1_name,
-        bOwner: fx.b_owner || fx.owner_b || fx.entry_2_player_name,
-        bTeam:  fx.b_team  || fx.team_b  || fx.entry_2_name
-      })));
-
-
-      const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
-      if (!picks.length) {
-        logPreviewDebug(`${league}: no picks generated`);
-        reasons.push(`${league}: no picks`);
-        continue;
-      }
-
-      rememberPreviews(league, ev.id, picks);
-      previews.push(formatPreviewMessage(league, ev.id, picks));
-      logPreviewDebug(`${league}: ok (teams=${teams.length}, fixtures=${fixtures.length}, picks=${picks.length})`);
     } catch (e) {
-      logPreviewDebug(`${league}: error`, e?.message || e);
-      reasons.push(`${league}: error - ${e?.message || e}`);
+      console.log(`Attempt ${attempts}/${maxAttempts} failed:`, e?.message || e);
+      if (attempts < maxAttempts) {
+        await sleep(5000 * attempts); // exponential backoff
+      }
     }
+  }
+  
+  if (!ev) {
+    console.log("Failed to get upcoming FPL event after retries – will retry in 1 hour");
+    // Schedule retry in 1 hour instead of crashing
+    setTimeout(scheduleDeadlineReminders, 60 * 60 * 1000);
+    return;
   }
 
-  if (previews.length) {
-    await channel.send(previews.join("\n\n"));
-    logPreviewDebug(`posted ${previews.length} preview blocks for GW${ev.id} (${label})`);
-  } else {
-    console.log(`[previews] None generated for GW${ev.id} (${label}). Reasons: ${reasons.join("; ")}`);
-    if (PREVIEW_DEBUG_NOTIFY) {
-      await channel.send(
-        `⚠️ Could not generate GW${ev.id} Ones to Watch (${label}).\n` +
-        reasons.map(r => `• ${r}`).join("\n")
-      ).catch(()=>{});
+  const deadline = new Date(ev.deadline_time);
+  const oneDayBefore = new Date(deadline.getTime() - 24 * 60 * 60 * 1000);
+  const oneHourBefore = new Date(deadline.getTime() - 60 * 60 * 1000);
+
+  clearReminders();
+
+  // Rest of your existing scheduling logic...
+  const runPreviews = async (label) => {
+    logPreviewDebug(`runPreviews start (${label}) for GW${ev.id}`);
+
+    const reasons = [];
+    const previews = [];
+
+    for (const league of LEAGUES) {
+      try {
+        await respectFplRateLimit(); // CRITICAL: rate limit between calls
+        const rows = await fetchLeagueTable(league);
+        const teams = normalizeTeams(rows);
+        if (!teams.length) {
+          logPreviewDebug(`${league}: no league table data`);
+          reasons.push(`${league}: no league table data`);
+          continue;
+        }
+
+        await respectFplRateLimit(); // CRITICAL: rate limit
+        const fixtures = await fetchFixtures(league, ev.id);
+        if (!fixtures?.length) {
+          logPreviewDebug(`${league}: no fixtures for GW${ev.id}`);
+          reasons.push(`${league}: no fixtures`);
+          continue;
+        }
+
+        const picks = selectDramaticMatchups(teams, { league, fixtures, gw: ev.id });
+        if (!picks.length) {
+          logPreviewDebug(`${league}: no picks generated`);
+          reasons.push(`${league}: no picks`);
+          continue;
+        }
+
+        rememberPreviews(league, ev.id, picks);
+        previews.push(formatPreviewMessage(league, ev.id, picks));
+        logPreviewDebug(`${league}: ok (teams=${teams.length}, fixtures=${fixtures.length}, picks=${picks.length})`);
+      } catch (e) {
+        logPreviewDebug(`${league}: error`, e?.message || e);
+        reasons.push(`${league}: error - ${e?.message || e}`);
+      }
     }
+
+    if (previews.length) {
+      await channel.send(previews.join("\n\n"));
+      logPreviewDebug(`posted ${previews.length} preview blocks for GW${ev.id} (${label})`);
+    } else {
+      console.log(`[previews] None generated for GW${ev.id} (${label}). Reasons: ${reasons.join("; ")}`);
+      if (PREVIEW_DEBUG_NOTIFY) {
+        await channel.send(
+          `⚠️ Could not generate GW${ev.id} Ones to Watch (${label}).\n` +
+          reasons.map(r => `• ${r}`).join("\n")
+        ).catch(() => {});
+      }
+    }
+  };
+
+  // Schedule reminders with the same logic as before
+  const scheduleAt = (when, label, fn) => {
+    const ms = when.getTime() - Date.now();
+    if (ms <= 0) return;
+    const t = setTimeout(async () => {
+      try {
+        const pst = formatInTZ(deadline, "America/Los_Angeles");
+        const est = formatInTZ(deadline, "America/New_York");
+        await channel.send(`🚨🚨🚨 @everyone 🚨🚨🚨 \n**GW${ev.id} is ${label}(s) away!**\n${pst} PST / ${est} EST`);
+        if (typeof fn === "function") await fn();
+      } catch (e) {
+        console.error("Failed to send reminder:", e?.message || e);
+      }
+    }, ms);
+    __scheduledTimeouts.push(t);
+  };
+
+  scheduleAt(oneDayBefore, "24-hour", async () => { await runPreviews("T-24h"); });
+
+  const now = Date.now();
+  if (now > oneDayBefore.getTime() && now < oneHourBefore.getTime()) {
+    logPreviewDebug("inside 24h window at (re)schedule time – running catch-up previews now");
+    await runPreviews("catch-up");
   }
-};
+
+  scheduleAt(oneHourBefore, "1-hour");
+
+  const reschedMs = Math.max(deadline.getTime() - Date.now() + 60 * 1000, 60 * 60 * 1000);
+  __scheduledTimeouts.push(setTimeout(scheduleDeadlineReminders, reschedMs));
+
+  console.log(`Scheduled GW${ev.id} reminders: 24h @ ${oneDayBefore.toISOString()}, 1h @ ${oneHourBefore.toISOString()}, deadline @ ${deadline.toISOString()}`);
+}
 
 // ---------- schedule the reminders ----------
 const scheduleAt = (when, label, fn) => {

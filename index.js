@@ -2836,7 +2836,31 @@ function parseSummaryFromLiveFPL(html) {
 
 // ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
 async function fetchPredictedFromLiveFPL() {
-  // If we have the relay configured, fetch the HTML from there first.
+  // helper to normalize parsed cards → { risers, fallers }
+  async function postProcess(cards) {
+    if (!Array.isArray(cards) || cards.length === 0) {
+      return { risers: [], fallers: [] };
+    }
+
+    const risersRaw  = cards.filter(c => c.progress >= 100);
+    const fallersRaw = cards.filter(c => c.progress <= -100);
+
+    const teamMap = await fetchFplTeamMap();
+    const attachTeam = (arr) =>
+      arr.map(p => ({
+        name: p.name,
+        team: teamMap[normalizePlayerKey(p.name)] || "",
+        price: p.price
+      }))
+      .slice(0, 25);
+
+    return {
+      risers: attachTeam(risersRaw),
+      fallers: attachTeam(fallersRaw),
+    };
+  }
+
+  // --- RELAY FIRST -------------------------------------------------
   if (RELAY_BASE) {
     try {
       const relayUrl = `${RELAY_BASE}/prices`;
@@ -2844,26 +2868,8 @@ async function fetchPredictedFromLiveFPL() {
 
       if (resp.data && resp.data.ok && resp.data.html) {
         const html = resp.data.html;
-
         const cards = parseSummaryFromLiveFPL(html); // [{name, price, progress}]
-        if (!cards.length) {
-          return { risers: [], fallers: [] };
-        }
-
-        const risersRaw  = cards.filter(c => c.progress >= 100);
-        const fallersRaw = cards.filter(c => c.progress <= -100);
-
-        const teamMap = await fetchFplTeamMap();
-        const attachTeam = (arr) => arr.map(p => ({
-          name: p.name,
-          team: teamMap[normalizePlayerKey(p.name)] || "",
-          price: p.price
-        })).slice(0, 25);
-
-        return {
-          risers: attachTeam(risersRaw),
-          fallers: attachTeam(fallersRaw),
-        };
+        return await postProcess(cards);
       } else {
         console.log("relay /prices returned not-ok or missing html, falling back to direct scrape");
       }
@@ -2872,9 +2878,7 @@ async function fetchPredictedFromLiveFPL() {
     }
   }
 
-  // FALLBACK PATH:
-  // If RELAY_BASE is not set (like you're running locally),
-  // or the relay had a problem, we continue to use your old direct logic.
+  // --- DIRECT FALLBACK (local dev or relay down) -------------------
   const url = "https://www.livefpl.net/prices";
 
   const { data: html } = await getWithRetries(url, {
@@ -2892,39 +2896,28 @@ async function fetchPredictedFromLiveFPL() {
   });
 
   const cards = parseSummaryFromLiveFPL(html);
-  if (!cards.length) {
-    return { risers: [], fallers: [] };
-  }
-
-  const risersRaw  = cards.filter(c => c.progress >= 100);
-  const fallersRaw = cards.filter(c => c.progress <= -100);
-
-  const teamMap = await fetchFplTeamMap();
-  const attachTeam = (arr) => arr.map(p => ({
-    name: p.name,
-    team: teamMap[normalizePlayerKey(p.name)] || "",
-    price: p.price
-  })).slice(0, 25);
-
-  return {
-    risers: attachTeam(risersRaw),
-    fallers: attachTeam(fallersRaw),
-  };
+  return await postProcess(cards);
 }
 
 
 
+
 function buildPredictedMessage(pred) {
+  const risers  = Array.isArray(pred?.risers)  ? pred.risers  : [];
+  const fallers = Array.isArray(pred?.fallers) ? pred.fallers : [];
+
   const lines = [];
   lines.push("**POTENTIAL PRICE CHANGES:**");
   lines.push("");
 
   lines.push("**Predicted Risers:**");
-  if (pred.risers.length) {
-    pred.risers.forEach(p => {
+  if (risers.length) {
+    risers.forEach(p => {
       const cur = fmtPrice(p.price);
       const next = fmtPrice(addDelta(p.price, +0.1));
-      lines.push(`${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+      lines.push(
+        `${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`
+      );
     });
   } else {
     lines.push("_None currently_");
@@ -2932,11 +2925,13 @@ function buildPredictedMessage(pred) {
 
   lines.push("");
   lines.push("**Predicted Fallers:**");
-  if (pred.fallers.length) {
-    pred.fallers.forEach(p => {
+  if (fallers.length) {
+    fallers.forEach(p => {
       const cur = fmtPrice(p.price);
       const next = fmtPrice(addDelta(p.price, -0.1));
-      lines.push(`${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+      lines.push(
+        `${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`
+      );
     });
   } else {
     lines.push("_None currently_");
@@ -2944,6 +2939,7 @@ function buildPredictedMessage(pred) {
 
   return lines.join("\n");
 }
+
 
 function canonKey(p) {
   const name = String(p.name || "").trim().toLowerCase();
@@ -3386,23 +3382,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // NEW: /price_predictions
   if (interaction.commandName === "price_predictions") {
     try {
-      // Acknowledge first so Discord doesn't time out
+      // Defer so Discord doesn't time out
       await interaction.deferReply({ ephemeral: true });
 
-      // This MUST be the hardened version that calls getWithRetries()
-      const { risers, fallers } = await fetchPredictedFromLiveFPL();
+      // Get predictions (relay first, fallback direct)
+      const result = await fetchPredictedFromLiveFPL();
 
-      const msg = buildPredictedMessage(risers, fallers);
+      // Build message from the object { risers: [...], fallers: [...] }
+      const msg = buildPredictedMessage(result);
 
       await interaction.editReply({
-        content: msg || "No predicted price movements available right now.",
+        content:
+          msg ||
+          "No predicted price movements available right now. (No current risers/fallers.)",
       });
     } catch (e) {
       console.log("predictions slash error:", e?.message || e);
 
-      // We still MUST respond to the interaction if we haven't already
       try {
-        if (interaction.deferred) {
+        if (interaction.deferred || interaction.replied) {
           await interaction.editReply({
             content:
               "Couldn't fetch predicted price risers/fallers (source rate limited / 503). Try again later.",
@@ -3415,12 +3413,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
       } catch (_) {
-        // swallow so we don't throw out of the handler
+        // swallow to avoid throwing out of the handler
       }
     }
-
-    return;
   }
+
 
 
   // NEW: /price_changes

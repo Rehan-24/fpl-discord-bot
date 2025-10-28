@@ -1822,29 +1822,22 @@ const REMINDER_CHANNEL_ID = process.env.DEADLINE_CHANNEL_ID;
 const TZ = process.env.TZ || "America/Los_Angeles";
 
 async function getNextFplEvent() {
-  const { data } = await getWithRetries(
-    "https://fantasy.premierleague.com/api/bootstrap-static/",
-    {
-      timeout: 20000,
-      headers: {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": process.env.FPL_USER_AGENT ||
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.8",
-      },
-      referer: "https://fantasy.premierleague.com/",
-      origin: "https://fantasy.premierleague.com",
-      useFplWarmup: true, // CRITICAL: warm up to get cookies
-    }
-  );
-  
+  // pull full bootstrap data (via relay first, fallback direct only if relay fails)
+  const data = await getBootstrapData();
+
   const now = new Date();
   const events = data?.events || [];
+
+  // same selection logic you already had:
+  // - filter events whose deadline is in the future
+  // - sort soonest first
   const upcoming = events
     .filter(e => e.deadline_time && new Date(e.deadline_time) > now)
     .sort((a, b) => new Date(a.deadline_time) - new Date(b.deadline_time));
+
   return upcoming[0] || null;
 }
+
 
 let __scheduledTimeouts = [];
 let __LAST_PREVIEWS = {};

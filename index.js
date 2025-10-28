@@ -439,21 +439,7 @@ async function refreshManagerDiscordMap() {
 
 // Latest finished GW (prefers most recent finished event)
 async function getLatestFinishedGwNumber() {
-  const { data } = await getWithRetries(
-    "https://fantasy.premierleague.com/api/bootstrap-static/",
-    {
-      timeout: 20000,
-      headers: {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": process.env.FPL_USER_AGENT ||
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.8",
-      },
-      referer: "https://fantasy.premierleague.com/",
-      origin: "https://fantasy.premierleague.com",
-      useFplWarmup: true, // CRITICAL: warm up to get cookies
-    }
-  );
+  const data = await getBootstrapData();
   
   const events = data?.events || [];
   const finished = events
@@ -2276,23 +2262,7 @@ async function maybePostPrevGwSummaries() {
   // Fetch FPL events
    let bs;
   try {
-    const { data } = await getWithRetries(
-      "https://fantasy.premierleague.com/api/bootstrap-static/",
-      {
-        timeout: 15000,
-        headers: {
-          "Accept": "application/json, text/plain, */*",
-          "User-Agent": process.env.FPL_USER_AGENT ||
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-          "Accept-Language": "en-US,en;q=0.8",
-        },
-        // This is the magic sauce for FPL: pretend we're coming from their site,
-        // warm up once to grab cookies, and retry 503/429 gracefully.
-        referer: "https://fantasy.premierleague.com/",
-        origin:  "https://fantasy.premierleague.com",
-        useFplWarmup: true,
-      }
-    );
+    const data = await getBootstrapData();
     bs = data;
   } catch (e) {
     console.log("maybePostPrevGwSummaries: bootstrap fetch failed", e?.message || e);
@@ -2794,20 +2764,7 @@ async function fetchFplTeamMap() {
   if (__TEAM_MAP_CACHE) return __TEAM_MAP_CACHE;
 
   // Use getWithRetries instead of raw axios
-  const { data } = await getWithRetries(
-    "https://fantasy.premierleague.com/api/bootstrap-static/",
-    {
-      timeout: 20000,
-      headers: {
-        "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.8",
-      },
-      referer: "https://fantasy.premierleague.com/",
-      origin: "https://fantasy.premierleague.com",
-      useFplWarmup: true, // CRITICAL
-    }
-  );
+  const data = await getBootstrapData();
 
   const teams = {};
   for (const t of (data?.teams || [])) {

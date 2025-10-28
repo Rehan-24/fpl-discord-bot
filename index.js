@@ -879,6 +879,28 @@ async function fetchFplMundoArticle(url) {
   };
 }
 
+async function getBootstrapData() {
+  // Try relay first
+  if (RELAY_BASE) {
+    try {
+      const resp = await axios.get(`${RELAY_BASE}/bootstrap`, { timeout: 15000 });
+      if (resp.data && resp.data.ok) {
+        return resp.data.data; // relay returns { ok: true, data: <bootstrap json> }
+      } else {
+        console.log("relay /bootstrap returned not-ok, falling back to direct bootstrap-static");
+      }
+    } catch (err) {
+      console.log("relay /bootstrap failed, falling back to direct bootstrap-static:", err.message);
+    }
+  }
+
+  // Fallback for local dev
+  const directUrl = "https://fantasy.premierleague.com/api/bootstrap-static/";
+  const resp = await axios.get(directUrl, { timeout: 15000 });
+  return resp.data;
+}
+
+
 /* ---------- helpers used above ---------- */
 
 // Headless render with stealth: click consent if present; wait for content.
@@ -1568,19 +1590,22 @@ async function fetchLeagueTable(league) {
   const urls = [];
   const envKey = `LEAGUE_TABLE_ENDPOINT_${league.toUpperCase()}`;
 
-  // 1. If caller gave us a custom endpoint via env (per-league override)
+  // 1. Per-league override if you've set LEAGUE_TABLE_ENDPOINT_PREMIER, etc.
   if (process.env[envKey]) {
     urls.push(process.env[envKey]);
   }
 
-  // 2. If relay is configured, hit relay first.
+  // 2. Relay first (stable IP, caching, polite backoff)
+  const FPL_IDS = {
+    premier: "723566",
+    championship: "850022",
+  };
   if (RELAY_BASE) {
-    const FPL_IDS = { premier: "723566", championship: "850022" };
     const leagueId = FPL_IDS[league] || league;
     urls.push(`${RELAY_BASE}/standings?league=${leagueId}`);
   }
 
-  // 3. Then fall back to our own APIs / site APIs
+  // 3. Internal API fallbacks (your Render and Vercel stuff)
   urls.push(
     `${BASE}/standings?league=${league}`,
     `${BASE}/league/${league}`,
@@ -1590,10 +1615,6 @@ async function fetchLeagueTable(league) {
 
   for (const u of urls) {
     try {
-      // We used to special-case FPL direct here. With the relay approach,
-      // we should *not* be calling fantasy.premierleague.com from Railway
-      // at all anymore, so we can skip that branch.
-
       const { data } = await axios.get(u, { timeout: 15000 });
 
       const arr =
@@ -1603,14 +1624,21 @@ async function fetchLeagueTable(league) {
         Array.isArray(data?.standings?.results) ? data.standings.results :
         (data?.teams || data?.table || []);
 
-      if (Array.isArray(arr) && arr.length) return arr;
+      if (Array.isArray(arr) && arr.length) {
+        return arr;
+      }
     } catch (e) {
-      console.log("fetchLeagueTable url failed", u, e?.response?.status || e.message);
+      console.log(
+        "fetchLeagueTable url failed",
+        u,
+        e?.response?.status || e.message
+      );
     }
   }
 
   return [];
 }
+
 
 
 
@@ -1841,46 +1869,40 @@ async function fetchFixtures(league, gw) {
   // If RELAY_BASE is set, we just ask the relay for fixtures
   // and adapt the shape to what the rest of the bot expects.
   if (RELAY_BASE) {
-    // map friendly league ("premier") to actual FPL league ID
-    const FPL_IDS = { premier: "723566", championship: "850022" };
-    const leagueId = FPL_IDS[league] || league;
+  const FPL_IDS = { premier: "723566", championship: "850022" };
+  const leagueId = FPL_IDS[league] || league;
 
-    try {
-      const relayUrl = `${RELAY_BASE}/fixtures?league=${leagueId}&gw=${gw}&page=1`;
-      const resp = await axios.get(relayUrl, { timeout: 15000 });
+  try {
+    const relayUrl = `${RELAY_BASE}/fixtures?league=${leagueId}&gw=${gw}&page=1`;
+    const resp = await axios.get(relayUrl, { timeout: 15000 });
 
-      if (resp.data && resp.data.ok) {
-        const raw = resp.data.data?.results
-          || resp.data.data?.matches
-          || resp.data.data?.fixtures
-          || resp.data.data
-          || [];
+    if (resp.data && resp.data.ok) {
+      const raw = resp.data.data?.results
+        || resp.data.data?.matches
+        || resp.data.data?.fixtures
+        || resp.data.data
+        || [];
 
-        // Normalize to the same internal shape your code later expects:
-        // You were eventually pushing fixtures like:
-        // {
-        //   a_owner: fx.entry_1_player_name,
-        //   b_owner: fx.entry_2_player_name,
-        //   a_team:  fx.entry_1_name,
-        //   b_team:  fx.entry_2_name,
-        // }
-        const cleaned = Array.isArray(raw) ? raw.map(fx => ({
-          a_owner: fx.entry_1_player_name,
-          b_owner: fx.entry_2_player_name,
-          a_team:  fx.entry_1_name,
-          b_team:  fx.entry_2_name,
-        })) : [];
+      const cleaned = Array.isArray(raw)
+        ? raw.map(fx => ({
+            a_owner:  fx.entry_1_player_name,
+            b_owner:  fx.entry_2_player_name,
+            a_team:   fx.entry_1_name,
+            b_team:   fx.entry_2_name,
+            a_points: fx.entry_1_points ?? fx.points_a ?? fx.total_points_a ?? null,
+            b_points: fx.entry_2_points ?? fx.points_b ?? fx.total_points_b ?? null,
+          }))
+        : [];
 
-        return cleaned;
-      }
-
-      // If relay responded but structure looked weird, fall through to legacy path
-      console.log("relay fixtures shape unexpected, falling back");
-    } catch (err) {
-      console.log("relay fixtures failed, falling back", err.message);
-      // If relay is down or blocked or whatever, we continue into the old logic below
+      return cleaned;
     }
+
+    console.log("relay fixtures shape unexpected, falling back");
+  } catch (err) {
+    console.log("relay fixtures failed, falling back", err.message);
   }
+  }
+
 
 
   // ----- Tunables -----
@@ -2864,27 +2886,62 @@ function parseSummaryFromLiveFPL(html) {
 
 // ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
 async function fetchPredictedFromLiveFPL() {
+  // If we have the relay configured, fetch the HTML from there first.
+  if (RELAY_BASE) {
+    try {
+      const relayUrl = `${RELAY_BASE}/prices`;
+      const resp = await axios.get(relayUrl, { timeout: 20000 });
+
+      if (resp.data && resp.data.ok && resp.data.html) {
+        const html = resp.data.html;
+
+        const cards = parseSummaryFromLiveFPL(html); // [{name, price, progress}]
+        if (!cards.length) {
+          return { risers: [], fallers: [] };
+        }
+
+        const risersRaw  = cards.filter(c => c.progress >= 100);
+        const fallersRaw = cards.filter(c => c.progress <= -100);
+
+        const teamMap = await fetchFplTeamMap();
+        const attachTeam = (arr) => arr.map(p => ({
+          name: p.name,
+          team: teamMap[normalizePlayerKey(p.name)] || "",
+          price: p.price
+        })).slice(0, 25);
+
+        return {
+          risers: attachTeam(risersRaw),
+          fallers: attachTeam(fallersRaw),
+        };
+      } else {
+        console.log("relay /prices returned not-ok or missing html, falling back to direct scrape");
+      }
+    } catch (err) {
+      console.log("relay /prices failed, falling back to direct scrape:", err.message);
+    }
+  }
+
+  // FALLBACK PATH:
+  // If RELAY_BASE is not set (like you're running locally),
+  // or the relay had a problem, we continue to use your old direct logic.
   const url = "https://www.livefpl.net/prices";
 
-  // use our retrying wrapper instead of raw axios.get
   const { data: html } = await getWithRetries(url, {
     timeout: 20000,
     headers: {
-      // pretend to be a real browser-ish client, plus our bot UA
       "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
       "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
       "Cache-Control": "no-cache",
       "Pragma": "no-cache",
     },
-    // livefpl.net doesn't care about FPL cookies, so no warmup
     useFplWarmup: false,
     referer: "https://www.livefpl.net/prices",
     origin:  "https://www.livefpl.net",
   });
 
-  // still parse like before
-  const cards = parseSummaryFromLiveFPL(html); // [{name, price, progress}]
+  const cards = parseSummaryFromLiveFPL(html);
   if (!cards.length) {
     return { risers: [], fallers: [] };
   }
@@ -2904,6 +2961,7 @@ async function fetchPredictedFromLiveFPL() {
     fallers: attachTeam(fallersRaw),
   };
 }
+
 
 
 function buildPredictedMessage(pred) {
@@ -3058,6 +3116,80 @@ function parseConfirmedTable($, $table, meta, teamMap) {
 }
 
 async function fetchConfirmedPriceChanges() {
+  // ---- RELAY FIRST -------------------------------------------------
+  if (RELAY_BASE) {
+    try {
+      const relayUrl = `${RELAY_BASE}/confirmed_prices`;
+      const resp = await axios.get(relayUrl, { timeout: 20000 });
+
+      if (resp.data && resp.data.ok && resp.data.html) {
+        const html = resp.data.html;
+
+        // Same CF check you already do
+        if (/just a moment/i.test(html) && /cloudflare/i.test(html)) {
+          throw new Error("Blocked by Cloudflare (challenge page from relay)");
+        }
+
+        // parse exactly like before
+        const $ = cheerio.load(html);
+        const teamMap = await fetchFplTeamMap().catch(() => null);
+
+        const $tables = $("table");
+        if (process.env.LIVEFPL_DEBUG) {
+          console.log(`[price_changes] tables found: ${$tables.length}`);
+        }
+        if (!$tables.length) return { risers: [], fallers: [] };
+
+        const candidates = [];
+        $tables.each((_, el) => {
+          const $t = $(el);
+          const meta = detectHeaderRow($, $t);
+          if (meta) {
+            candidates.push({ $t, meta });
+            if (process.env.LIVEFPL_DEBUG) {
+              console.log("[price_changes] header:", meta.headers);
+            }
+          }
+        });
+
+        if (!candidates.length) {
+          if (process.env.LIVEFPL_DEBUG) {
+            console.log("[price_changes] no header rows detected");
+          }
+          return { risers: [], fallers: [] };
+        }
+
+        // first (top-most) table = latest day
+        const { $t, meta } = candidates[0];
+        const rows = parseConfirmedTable($, $t, meta, teamMap);
+
+        // classify
+        let risers  = rows.filter(r => r.next > r.old);
+        let fallers = rows.filter(r => r.next < r.old);
+
+        // dedup like before
+        const key = p => `${normalizePlayerKey(p.name)}|${(p.team||"").toLowerCase()}|${p.old}->${p.next}`;
+        const uniq = arr => arr.filter((x, i, self) =>
+          self.findIndex(y => key(y) === key(x)) === i
+        );
+
+        risers = uniq(risers);
+        fallers = uniq(fallers);
+
+        if (process.env.LIVEFPL_DEBUG) {
+          console.log(`[price_changes] parsed rows: ${rows.length} (risers: ${risers.length}, fallers: ${fallers.length})`);
+        }
+
+        return { risers, fallers };
+      } else {
+        console.log("relay /confirmed_prices returned not-ok or missing html, falling back to direct fetch");
+      }
+    } catch (err) {
+      console.log("relay /confirmed_prices failed, falling back to direct fetch:", err.message);
+    }
+  }
+
+  // ---- FALLBACK: DIRECT SCRAPE (original logic) --------------------
   const url = "https://plan.livefpl.net/price_changes";
 
   const { data: html } = await getWithRetries(url, {
@@ -3087,7 +3219,6 @@ async function fetchConfirmedPriceChanges() {
   }
   if (!$tables.length) return { risers: [], fallers: [] };
 
-  // Build candidates with detected header rows (in DOM order)
   const candidates = [];
   $tables.each((_, el) => {
     const $t = $(el);
@@ -3105,17 +3236,16 @@ async function fetchConfirmedPriceChanges() {
     return { risers: [], fallers: [] };
   }
 
-  // Parse ONLY the first candidate (top-most = latest day)
   const { $t, meta } = candidates[0];
   const rows = parseConfirmedTable($, $t, meta, teamMap);
 
-  // Classify
   let risers  = rows.filter(r => r.next > r.old);
   let fallers = rows.filter(r => r.next < r.old);
 
-  // Dedup safety
   const key = p => `${normalizePlayerKey(p.name)}|${(p.team||"").toLowerCase()}|${p.old}->${p.next}`;
-  const uniq = arr => arr.filter((x, i, self) => self.findIndex(y => key(y) === key(x)) === i);
+  const uniq = arr => arr.filter((x, i, self) =>
+    self.findIndex(y => key(y) === key(x)) === i
+  );
 
   risers = uniq(risers);
   fallers = uniq(fallers);
@@ -3126,6 +3256,7 @@ async function fetchConfirmedPriceChanges() {
 
   return { risers, fallers };
 }
+
 
 
 

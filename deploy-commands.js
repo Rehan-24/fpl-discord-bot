@@ -1,4 +1,6 @@
 require("dotenv").config();
+const { faOppCommand } = require("./facup");
+
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
 // /next_deadline — show next FPL deadline (PST/EST)
@@ -192,6 +194,7 @@ const commands = [
   pricePredictions,
   priceChanges,
   mundoPublish,
+  faOppCommand,
 ].map(c => c.toJSON());
 
 (async () => {

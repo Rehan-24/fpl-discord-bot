@@ -15,6 +15,7 @@ app.use(express.json({ limit: "1mb" }));
 // ---- Robust GET with warm-up, cookies, Referer/Origin, backoff ----
 const https = require("https");
 const http = require("http");
+const facup = require("./facup");
 
 const DEFAULT_UA =
   process.env.FPL_USER_AGENT ||
@@ -3366,6 +3367,8 @@ client.once(Events.ClientReady, async (c) => {
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   try { scheduleWeeklyFplMundoPosts(); } catch (e) { console.log("FPL Mundo schedule error:", e?.message || e); }
   try { await schedulePriceWatchers(client); } catch (e) { console.log("Price schedule error:", e?.message || e); }
+  try { facup.scheduleFaCupReminders(client); } catch(e) { console.log("FA Cup schedule error:", e?.message || e); }
+  try { facup.scheduleFaCupRoundSummary(client); } catch(e) { console.log("FA Cup summary error:", e?.message || e); }
 
 
   console.log(`Logged in as ${c.user.tag}`);
@@ -3378,6 +3381,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({ content: "Pong!", ephemeral: true });
     return;
   }
+
+  if (interaction.commandName === "fa_opp") { await facup.handleFaOpp(interaction); return; }
 
     // NEW: /price_predictions
   if (interaction.commandName === "price_predictions") {

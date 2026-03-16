@@ -192,52 +192,74 @@ async function scheduleFaCupReminders(client) {
   const events = bootstrap?.events ?? [];
   const now = new Date();
 
-  // For each FA Cup round, find its GW and schedule a 36h-before reminder
-  for (const round of FA_CUP_ROUNDS) {
-    if (round.round === "3rd") continue; // Final week handled under "final"
+  // Max safe setTimeout delay — JS setTimeout overflows at ~24.8 days (2^31 ms)
+  // and fires immediately. FA Cup rounds are weeks apart so we only schedule
+  // the NEXT upcoming reminder; after it fires we re-run to pick up the next one.
+  const MAX_TIMEOUT_MS = 2_000_000_000; // ~23 days, safely under 32-bit limit
 
-    const event = events.find(e => e.id === round.gw);
-    if (!event?.deadline_time) continue;
+  const upcomingRounds = FA_CUP_ROUNDS
+    .filter(r => r.round !== "3rd")
+    .map(r => {
+      const event = events.find(e => e.id === r.gw);
+      if (!event?.deadline_time) return null;
+      const deadline = new Date(event.deadline_time);
+      const fireAt   = new Date(deadline.getTime() - 36 * 60 * 60 * 1000);
+      const msUntil  = fireAt.getTime() - now.getTime();
+      return { round: r, deadline, fireAt, msUntil };
+    })
+    .filter(r => r !== null && r.msUntil > 0)
+    .sort((a, b) => a.msUntil - b.msUntil); // soonest first
 
-    const deadline   = new Date(event.deadline_time);
-    const thirtysSixHoursBefore = new Date(deadline.getTime() - 36 * 60 * 60 * 1000);
-    const msUntil    = thirtysSixHoursBefore.getTime() - now.getTime();
-
-    if (msUntil <= 0) continue; // already passed
-
-    console.log(
-      `[FA Cup Reminder] Scheduling ${round.label} (GW${round.gw}) reminder for ` +
-      `${thirtysSixHoursBefore.toISOString()} (in ${Math.round(msUntil / 3600000)}h)`
+  if (!upcomingRounds.length) {
+    console.log("[FA Cup Reminder] No upcoming FA Cup rounds to schedule — rechecking in 7 days.");
+    __facupReminderTimeouts.push(
+      setTimeout(() => scheduleFaCupReminders(client), 7 * 24 * 60 * 60 * 1000)
     );
-
-    const t = setTimeout(async () => {
-      try {
-        const pst = formatInTZ(deadline, "America/Los_Angeles");
-        const est = formatInTZ(deadline, "America/New_York");
-
-        const embed = new EmbedBuilder()
-          .setColor(0x5b329e) // TFPL purple
-          .setTitle(`⚽ FA Cup — ${round.label} kicks off in 36 hours!`)
-          .setDescription(
-            `**GW${round.gw} deadline:** ${pst} PST / ${est} EST\n\n` +
-            `Make sure your squad is set — your GW${round.gw} score will decide your FA Cup matchup!\n\n` +
-            `🏆 [View the full FA Cup bracket](${FACUP_URL})`
-          )
-          .setFooter({ text: "TFPL Fantasy FA Cup • tfpl.vercel.app/facup" });
-
-        await channel.send({ content: "@everyone", embeds: [embed] });
-        console.log(`[FA Cup Reminder] Sent ${round.label} reminder.`);
-      } catch (e) {
-        console.log(`[FA Cup Reminder] Failed to send ${round.label} reminder:`, e?.message || e);
-      }
-    }, msUntil);
-
-    __facupReminderTimeouts.push(t);
+    return;
   }
 
-  // Reschedule next season (after all rounds are done) — check again in 7 days
-  const reschedMs = 7 * 24 * 60 * 60 * 1000;
-  __facupReminderTimeouts.push(setTimeout(() => scheduleFaCupReminders(client), reschedMs));
+  // Only schedule the NEXT reminder. Re-run this function after it fires.
+  const next = upcomingRounds[0];
+  const scheduleMs = Math.min(next.msUntil, MAX_TIMEOUT_MS);
+  const isDeferred  = scheduleMs < next.msUntil;
+
+  console.log(
+    `[FA Cup Reminder] ${isDeferred ? "Deferring" : "Scheduling"} ` +
+    `${next.round.label} (GW${next.round.gw}) reminder for ` +
+    `${next.fireAt.toISOString()} (in ${Math.round(next.msUntil / 3600000)}h)`
+  );
+
+  const t = setTimeout(async () => {
+    if (isDeferred) {
+      // Not time yet — just re-check closer to the actual fire time
+      await scheduleFaCupReminders(client);
+      return;
+    }
+    try {
+      const { round, deadline } = next;
+      const pst = formatInTZ(deadline, "America/Los_Angeles");
+      const est = formatInTZ(deadline, "America/New_York");
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5b329e)
+        .setTitle(`⚽ FA Cup — ${round.label} kicks off in 36 hours!`)
+        .setDescription(
+          `**GW${round.gw} deadline:** ${pst} PST / ${est} EST\n\n` +
+          `Make sure your squad is set — your GW${round.gw} score will decide your FA Cup matchup!\n\n` +
+          `🏆 [View the full FA Cup bracket](${FACUP_URL})`
+        )
+        .setFooter({ text: "TFPL Fantasy FA Cup • tfpl.vercel.app/facup" });
+
+      await channel.send({ content: "@everyone", embeds: [embed] });
+      console.log(`[FA Cup Reminder] Sent ${round.label} reminder.`);
+    } catch (e) {
+      console.log(`[FA Cup Reminder] Failed to send reminder:`, e?.message || e);
+    }
+    // Re-run to schedule the next round's reminder
+    await scheduleFaCupReminders(client);
+  }, scheduleMs);
+
+  __facupReminderTimeouts.push(t);
 }
 
 // ── 2. FA Cup round summary (posted after each round finishes) ─────────────────

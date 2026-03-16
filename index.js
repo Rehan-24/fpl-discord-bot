@@ -2784,18 +2784,36 @@ async function fetchFplTeamMap() {
 // Extract the "Summary of Predictions" section and read player cards
 function parseSummaryFromLiveFPL(html) {
   const $ = cheerio.load(html);
+  const DEBUG = process.env.LIVEFPL_DEBUG;
 
-  // Find "Summary of Predictions" heading and collect nodes until the next big section
-  const hdr = $("h1,h2,h3,h4").filter((_, el) =>
+  if (DEBUG) {
+    console.log("[predicted] html length:", html.length);
+    // Log all headings found so we can see what's actually on the page
+    const headings = $("h1,h2,h3,h4,h5,h6").map((_, el) => `<${el.tagName}> ${$(el).text().trim().slice(0, 60)}`).toArray();
+    console.log("[predicted] headings found:", headings.length, headings.slice(0, 10));
+  }
+
+  // Find "Summary of Predictions" heading — try progressively looser matches
+  let hdr = $("h1,h2,h3,h4").filter((_, el) =>
     /summary of predictions/i.test($(el).text())
   ).first();
 
-  if (!hdr.length) return [];
+  // Fallback: some page versions use "Predicted" as the section title
+  if (!hdr.length) {
+    hdr = $("h1,h2,h3,h4").filter((_, el) =>
+      /^predicted$/i.test($(el).text().trim())
+    ).first();
+  }
+
+  if (!hdr.length) {
+    if (DEBUG) console.log("[predicted] no 'Summary of Predictions' heading found — page may not be fully rendered");
+    return [];
+  }
+  if (DEBUG) console.log("[predicted] found heading:", hdr.text().trim());
 
   const blockNodes = [];
   let n = hdr[0].nextSibling;
   while (n) {
-    // stop at the start of the big "All Players" table/section
     if (n.type === "tag") {
       const txt = $(n).text().trim();
       if (/^player\s+progress/i.test(txt) || /^all\s+players/i.test(txt)) break;
@@ -2805,37 +2823,60 @@ function parseSummaryFromLiveFPL(html) {
   }
 
   const section = $(blockNodes);
+  if (DEBUG) console.log("[predicted] section text length:", section.text().length);
+
   const out = [];
 
-  // Each player card usually has an h5/h6 (player name),
-  // a line with position + "£<price>", and a line with "<percent>%"
+  // Try h5/h6 first (original card layout)
   section.find("h5,h6").each((_, h) => {
     const name = $(h).text().trim();
     if (!name) return;
 
-    // Use parent container text as a cheap way to grab price & percent
     const txt = $(h).parent().text().replace(/\s+/g, " ").trim();
-
-    // Price like "£5.6" or "£10.4"
     const mPrice = txt.match(/£\s*([0-9]+(?:\.[0-9])?)/i);
-    // Progress like "-103.7%" or "104.1%"
-    const mPct = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
-
+    const mPct   = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
     if (!mPrice || !mPct) return;
 
-    const price = parseFloat(mPrice[1]);
-    const progress = parseFloat(mPct[1]); // positive = rise, negative = fall
-
+    const price    = parseFloat(mPrice[1]);
+    const progress = parseFloat(mPct[1]);
     if (!isFinite(price) || !isFinite(progress)) return;
     out.push({ name, price, progress });
   });
+
+  if (DEBUG) console.log("[predicted] cards found via h5/h6:", out.length);
+
+  // Fallback: if h5/h6 found nothing, try any element with a £price AND % in it
+  // (handles layout changes where player names are in spans/divs instead)
+  if (!out.length) {
+    if (DEBUG) console.log("[predicted] trying fallback selector (any element with £ and %)");
+    section.find("[class*=card],[class*=player],[class*=item]").each((_, el) => {
+      const txt  = $(el).text().replace(/\s+/g, " ").trim();
+      const mPct = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
+      if (!mPct) return;
+      const progress = parseFloat(mPct[1]);
+      if (!isFinite(progress) || Math.abs(progress) < 80) return; // only near-certain predictions
+
+      const mPrice = txt.match(/£\s*([0-9]+(?:\.[0-9])?)/i);
+      if (!mPrice) return;
+      const price = parseFloat(mPrice[1]);
+      if (!isFinite(price)) return;
+
+      // name: first chunk of text before position/price info
+      const name = txt.split(/\s*(?:£|[A-Z]{3}|GK|DEF|MID|FWD)/)[0].trim();
+      if (!name || name.length > 40) return;
+      out.push({ name, price, progress });
+    });
+    if (DEBUG) console.log("[predicted] cards found via fallback:", out.length);
+  }
 
   return out;
 }
 
 
-// ---------- PREDICTED (robust: JSON first, HTML fallback) ----------
+// ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {
+  const DEBUG = process.env.LIVEFPL_DEBUG;
+
   // helper to normalize parsed cards → { risers, fallers }
   async function postProcess(cards) {
     if (!Array.isArray(cards) || cards.length === 0) {
@@ -2844,6 +2885,8 @@ async function fetchPredictedFromLiveFPL() {
 
     const risersRaw  = cards.filter(c => c.progress >= 100);
     const fallersRaw = cards.filter(c => c.progress <= -100);
+
+    if (DEBUG) console.log(`[predicted] postProcess: ${risersRaw.length} risers, ${fallersRaw.length} fallers from ${cards.length} cards`);
 
     const teamMap = await fetchFplTeamMap();
     const attachTeam = (arr) =>
@@ -2864,22 +2907,27 @@ async function fetchPredictedFromLiveFPL() {
   if (RELAY_BASE) {
     try {
       const relayUrl = `${RELAY_BASE}/prices`;
+      if (DEBUG) console.log("[predicted] trying relay:", relayUrl);
       const resp = await axios.get(relayUrl, { timeout: 20000 });
+
+      if (DEBUG) console.log("[predicted] relay response ok:", resp.data?.ok, "has html:", !!resp.data?.html, "html length:", resp.data?.html?.length);
 
       if (resp.data && resp.data.ok && resp.data.html) {
         const html = resp.data.html;
-        const cards = parseSummaryFromLiveFPL(html); // [{name, price, progress}]
-        return await postProcess(cards);
+        const cards = parseSummaryFromLiveFPL(html);
+        if (cards.length) return await postProcess(cards);
+        console.log("[predicted] relay returned html but parser found 0 cards — falling back to direct scrape");
       } else {
-        console.log("relay /prices returned not-ok or missing html, falling back to direct scrape");
+        console.log("[predicted] relay /prices returned not-ok or missing html — falling back to direct scrape");
       }
     } catch (err) {
-      console.log("relay /prices failed, falling back to direct scrape:", err.message);
+      console.log("[predicted] relay /prices failed:", err.message, "— falling back to direct scrape");
     }
   }
 
-  // --- DIRECT FALLBACK (local dev or relay down) -------------------
+  // --- DIRECT FALLBACK -------------------
   const url = "https://www.livefpl.net/prices";
+  if (DEBUG) console.log("[predicted] fetching direct:", url);
 
   const { data: html } = await getWithRetries(url, {
     timeout: 20000,
@@ -2894,6 +2942,8 @@ async function fetchPredictedFromLiveFPL() {
     referer: "https://www.livefpl.net/prices",
     origin:  "https://www.livefpl.net",
   });
+
+  if (DEBUG) console.log("[predicted] direct html length:", String(html).length, "is CSR shell:", String(html).length < 5000);
 
   const cards = parseSummaryFromLiveFPL(html);
   return await postProcess(cards);

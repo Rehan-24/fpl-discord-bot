@@ -15,7 +15,6 @@ app.use(express.json({ limit: "1mb" }));
 // ---- Robust GET with warm-up, cookies, Referer/Origin, backoff ----
 const https = require("https");
 const http = require("http");
-const facup = require("./facup");
 
 const DEFAULT_UA =
   process.env.FPL_USER_AGENT ||
@@ -3014,6 +3013,7 @@ function detectHeaderRow($, $table) {
       team: indexOfHeader(headers, ["team", "club", "squad"]),
       old:  indexOfHeader(headers, ["old price", "old", "before", "prev"]),
       next: indexOfHeader(headers, ["new price", "new", "after"]),
+      date: indexOfHeader(headers, ["date"]),  // capture date column if present
     };
 
     // Must have name + old + new to consider it a proper header row
@@ -3029,12 +3029,42 @@ function parseConfirmedTable($, $table, meta, teamMap) {
   if (!$table || !$table.length || !meta) return out;
 
   const rows = $table.find("tr").toArray();
+
+  // If the table has a Date column, find the most recent date and filter to it.
+  // This prevents returning the entire season's history.
+  let filterDate = null;
+  if (meta.idx.date >= 0) {
+    const allDates = [];
+    for (let i = meta.headerIndex + 1; i < rows.length; i++) {
+      const $tds = $(rows[i]).find("td");
+      const dateVal = $tds.get(meta.idx.date)
+        ? $($tds.get(meta.idx.date)).text().trim()
+        : "";
+      if (dateVal) allDates.push(dateVal);
+    }
+    if (allDates.length) {
+      // Sort descending and take the most recent date string
+      // Dates are typically "YYYY-MM-DD" or "DD Mon YYYY" — sort lexically works for ISO
+      const sorted = [...new Set(allDates)].sort().reverse();
+      filterDate = sorted[0];
+      if (process.env.LIVEFPL_DEBUG) {
+        console.log(`[price_changes] filtering to most recent date: ${filterDate} (${sorted.length} distinct dates in table)`);
+      }
+    }
+  }
+
   // Start parsing from the row AFTER the detected header row
   for (let i = meta.headerIndex + 1; i < rows.length; i++) {
     const $tds = $(rows[i]).find("td");
     if ($tds.length < 2) continue;
 
     const get = (ix) => (ix >= 0 && $tds.get(ix)) ? $($tds.get(ix)).text().trim() : "";
+
+    // Skip rows not matching the most recent date
+    if (filterDate && meta.idx.date >= 0) {
+      const rowDate = get(meta.idx.date);
+      if (rowDate && rowDate !== filterDate) continue;
+    }
 
     const nameCell = get(meta.idx.name);
     if (!nameCell) continue;
@@ -3232,10 +3262,25 @@ function buildConfirmedMessage(chg) {
     lines.push("_None_");
   }
 
-  // add the LiveFPL plan page link at the end
-  //lines.push("", "Source: https://plan.livefpl.net/price_changes");
-
   return lines.join("\n");
+}
+
+// Split a long message into Discord-safe chunks (max 1900 chars each to leave headroom)
+function splitIntoChunks(msg, maxLen = 1900) {
+  const lines = msg.split("\n");
+  const chunks = [];
+  let current = "";
+  for (const line of lines) {
+    const candidate = current ? current + "\n" + line : line;
+    if (candidate.length > maxLen && current) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
 }
 
 // Append a source link cleanly to any message
@@ -3299,7 +3344,13 @@ async function postConfirmedIfChanged(channel) {
     __LAST_CONF_SIG = sig;
 
     const msg = buildConfirmedMessage(chg);
-    if (msg.trim()) await channel.send(msg);
+    if (!msg.trim()) return;
+
+    // Split into Discord-safe chunks (4000 char limit per message)
+    const chunks = splitIntoChunks(msg);
+    for (const chunk of chunks) {
+      await channel.send(chunk);
+    }
   } catch (e) {
     console.log("Confirmed price watcher error:", e?.message || e);
   }
@@ -3367,8 +3418,6 @@ client.once(Events.ClientReady, async (c) => {
   try { await scheduleDeadlineReminders(); } catch (e) { console.log("Scheduling error:", e?.message || e); }
   try { scheduleWeeklyFplMundoPosts(); } catch (e) { console.log("FPL Mundo schedule error:", e?.message || e); }
   try { await schedulePriceWatchers(client); } catch (e) { console.log("Price schedule error:", e?.message || e); }
-  try { facup.scheduleFaCupReminders(client); } catch(e) { console.log("FA Cup schedule error:", e?.message || e); }
-  try { facup.scheduleFaCupRoundSummary(client); } catch(e) { console.log("FA Cup summary error:", e?.message || e); }
 
 
   console.log(`Logged in as ${c.user.tag}`);
@@ -3381,8 +3430,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({ content: "Pong!", ephemeral: true });
     return;
   }
-
-  if (interaction.commandName === "fa_opp") { await facup.handleFaOpp(interaction); return; }
 
     // NEW: /price_predictions
   if (interaction.commandName === "price_predictions") {

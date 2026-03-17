@@ -2807,7 +2807,7 @@ function parseSummaryFromLiveFPL(html) {
   const $grid = $("#summary .grid, section#summary .grid").first();
   if ($grid.length) {
     $grid.children().toArray().forEach((box, boxIdx) => {
-      const isRise = boxIdx === 0;
+      const isRise = boxIdx === 1; // grid: child[0]=falls (red), child[1]=rises (green)
       const $box = $(box);
 
       // Walk the box looking for section labels then player rows beneath them
@@ -3042,42 +3042,29 @@ function buildPredictedMessage(pred) {
   const risers  = Array.isArray(pred?.risers)  ? pred.risers  : [];
   const fallers = Array.isArray(pred?.fallers) ? pred.fallers : [];
 
-  // Split confirmed (>=100%) from maybe (90-99%)
-  const confirmedRisers  = risers.filter(p => (p.progress || 0) >= 100);
-  const maybeRisers      = risers.filter(p => (p.progress || 0) < 100);
-  const confirmedFallers = fallers.filter(p => Math.abs(p.progress || 0) >= 100);
-  const maybeFallers     = fallers.filter(p => Math.abs(p.progress || 0) < 100);
-
-  const fmtPlayer = (p, delta) => {
-    const cur  = fmtPrice(p.price);
-    const next = fmtPrice(addDelta(p.price, delta));
-    const pct  = p.progress != null ? ` _(${Math.abs(Math.round(p.progress))}%)_` : "";
-    return `${cur} ${delta > 0 ? UP : DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}${pct}`;
-  };
-
   const lines = [];
   lines.push("**POTENTIAL PRICE CHANGES:**", "");
 
   lines.push("**Predicted Risers:**");
-  if (confirmedRisers.length) {
-    confirmedRisers.forEach(p => lines.push(fmtPlayer(p, +0.1)));
+  if (risers.length) {
+    risers.forEach(p => {
+      const cur  = fmtPrice(p.price);
+      const next = fmtPrice(addDelta(p.price, +0.1));
+      lines.push(`${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+    });
   } else {
-    lines.push("_None confirmed tonight_");
-  }
-  if (maybeRisers.length) {
-    lines.push("_Maybe (95%+):_");
-    maybeRisers.forEach(p => lines.push(fmtPlayer(p, +0.1)));
+    lines.push("_None currently_");
   }
 
   lines.push("", "**Predicted Fallers:**");
-  if (confirmedFallers.length) {
-    confirmedFallers.forEach(p => lines.push(fmtPlayer(p, -0.1)));
+  if (fallers.length) {
+    fallers.forEach(p => {
+      const cur  = fmtPrice(p.price);
+      const next = fmtPrice(addDelta(p.price, -0.1));
+      lines.push(`${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`);
+    });
   } else {
-    lines.push("_None confirmed tonight_");
-  }
-  if (maybeFallers.length) {
-    lines.push("_Maybe (95%+):_");
-    maybeFallers.forEach(p => lines.push(fmtPlayer(p, -0.1)));
+    lines.push("_None currently_");
   }
 
   return lines.join("\n");
@@ -3389,7 +3376,7 @@ function buildConfirmedMessage(chg) {
   if (chg.risers.length) {
     chg.risers.forEach(p => {
       const teamText = p.team ? ` (${p.team})` : "";
-      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
+      lines.push(`${p.name}${teamText} - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");
@@ -3399,7 +3386,7 @@ function buildConfirmedMessage(chg) {
   if (chg.fallers.length) {
     chg.fallers.forEach(p => {
       const teamText = p.team ? ` (${p.team})` : "";
-      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
+      lines.push(`${p.name}${teamText} - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");

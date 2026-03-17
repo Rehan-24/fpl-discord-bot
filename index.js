@@ -2861,6 +2861,42 @@ function parseSummaryFromLiveFPL(html) {
 }
 
 
+async function renderLiveFplPrices() {
+  const browser = await puppeteerExtra.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    );
+    await page.setRequestInterception(true);
+    page.on("request", req => {
+      if (["stylesheet", "font", "image", "media"].includes(req.resourceType())) return req.abort();
+      req.continue();
+    });
+    await page.goto("https://www.livefpl.net/prices", { waitUntil: "networkidle0", timeout: 60000 });
+
+    // Page lands on Table tab — click Summary tab to get rise/fall boxes
+    await page.evaluate(() => {
+      const btn = Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === "Summary");
+      if (btn) btn.click();
+    });
+
+    // Wait for Summary content to render
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || "";
+      return text.includes("Predicted rises tonight") || text.includes("Predicted falls tonight");
+    }, { timeout: 15000 }).catch(() => {});
+
+    await new Promise(r => setTimeout(r, 800));
+    return await page.evaluate(() => document.documentElement.outerHTML);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 // ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {
   const DEBUG = process.env.LIVEFPL_DEBUG;

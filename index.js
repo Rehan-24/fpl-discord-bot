@@ -2807,8 +2807,11 @@ function parseSummaryFromLiveFPL(html) {
   const $grid = $("#summary .grid, section#summary .grid").first();
   if ($grid.length) {
     $grid.children().toArray().forEach((box, boxIdx) => {
-      const isRise = boxIdx === 1; // grid: child[0]=falls (red), child[1]=rises (green)
       const $box = $(box);
+      // Determine rise vs fall by header background color class
+      // Rises box has bg-emerald header, falls box has bg-red header
+      const boxHtml = $box.html() || "";
+      const isRise = /bg-emerald/i.test(boxHtml);
 
       // Walk the box looking for section labels then player rows beneath them
       let currentSection = "maybe"; // default — "maybe" unless we see "Projected" label
@@ -3200,16 +3203,25 @@ function parseConfirmedTable($, $table, meta, teamMap) {
     if (!nameCell) continue;
 
     let team = meta.idx.team >= 0 ? get(meta.idx.team) : "";
-    let name = nameCell;
+    // The Player cell sometimes contains "Name\nTeam" stacked — take only the first line
+    let name = nameCell.split("\n")[0].trim();
 
     // Fallback: "Name (TEAM)" packed into the Player cell
-    const paren = nameCell.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
+    const paren = name.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
     if (paren) {
       name = paren[1].trim();
       team = team || paren[2].trim();
     } else if (!team && teamMap) {
       const key = normalizePlayerKey(name);
       team = teamMap[key] || "";
+    }
+
+    // Use FPL team short name if the table team column gave us a full name
+    // e.g. prefer "SUN" over "Sunderland" for consistency — but keep full name if no short found
+    if (team && teamMap) {
+      const key = normalizePlayerKey(name);
+      const shortTeam = teamMap[key];
+      if (shortTeam) team = shortTeam;
     }
 
     const oldP = parseNumberLikePrice(get(meta.idx.old));
@@ -3376,7 +3388,7 @@ function buildConfirmedMessage(chg) {
   if (chg.risers.length) {
     chg.risers.forEach(p => {
       const teamText = p.team ? ` (${p.team})` : "";
-      lines.push(`${p.name}${teamText} - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
+      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${UP} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");
@@ -3386,7 +3398,7 @@ function buildConfirmedMessage(chg) {
   if (chg.fallers.length) {
     chg.fallers.forEach(p => {
       const teamText = p.team ? ` (${p.team})` : "";
-      lines.push(`${p.name}${teamText} - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
+      lines.push(`**${p.name}**${teamText} - ${fmtPrice(p.old)} ${DOWN} ${fmtPrice(p.next)}`);
     });
   } else {
     lines.push("_None_");

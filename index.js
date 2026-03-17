@@ -2798,16 +2798,22 @@ function parseSummaryFromLiveFPL(html) {
 
   if (DEBUG) {
     console.log("[predicted] html length:", html.length);
-    const summaryText = $("#summary").text().replace(/\s+/g, " ").trim().slice(0, 500);
-    console.log("[predicted] #summary text:", summaryText || "(not found)");
-    // Log the raw inner HTML of #summary so we can see what actually rendered
-    const summaryHtml = $("#summary").html();
-    if (summaryHtml) {
-      console.log("[predicted] #summary innerHTML (first 1000):", summaryHtml.slice(0, 1000));
-    }
-    // Also log direct children of #summary to understand structure
-    const children = $("#summary").children().toArray().map(el => `<${el.tagName} class="${$(el).attr("class") || ""}>">`);
-    console.log("[predicted] #summary direct children:", children);
+
+    // Dump ALL section and div ids so we can see what actually rendered
+    const allIds = $("[id]").toArray().map(el => `${el.tagName}#${$(el).attr("id")}`);
+    console.log("[predicted] all IDs in page:", allIds);
+
+    // Find any element containing "Predicted rises" or "Predicted falls"
+    $("*").each((_, el) => {
+      const t = $(el).clone().children().remove().end().text().trim();
+      if (/predicted (rises|falls)/i.test(t)) {
+        console.log("[predicted] found rise/fall text in:", el.tagName, $(el).attr("class")?.slice(0, 80), "| text:", t.slice(0, 60));
+      }
+    });
+
+    // Dump first 2000 chars of body text to see what's actually rendered
+    const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+    console.log("[predicted] body text (first 2000):", bodyText.slice(0, 2000));
   }
 
   const out = [];

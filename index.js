@@ -2881,6 +2881,36 @@ function parseSummaryFromLiveFPL(html) {
 }
 
 
+// Dedicated puppeteer render for livefpl.net/prices.
+// Waits specifically for the Summary section to render (default tab).
+async function renderLiveFplPrices() {
+  const browser = await puppeteerExtra.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    );
+    await page.setRequestInterception(true);
+    page.on("request", req => {
+      if (["stylesheet", "font", "image", "media"].includes(req.resourceType())) return req.abort();
+      req.continue();
+    });
+    await page.goto("https://www.livefpl.net/prices", { waitUntil: "networkidle0", timeout: 60000 });
+    // Wait until React renders the Summary section with player boxes
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || "";
+      return text.includes("Predicted rises tonight") || text.includes("Predicted falls tonight");
+    }, { timeout: 30000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1000));
+    return await page.evaluate(() => document.documentElement.outerHTML);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 // ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {
   const DEBUG = process.env.LIVEFPL_DEBUG;
@@ -2911,29 +2941,23 @@ async function fetchPredictedFromLiveFPL() {
     };
   }
 
-  // --- RELAY FIRST -------------------------------------------------
-  if (RELAY_BASE) {
+  // NOTE: The relay does a plain HTTP fetch of livefpl.net/prices which returns
+  // a 2376-byte JS shell — useless. Skip it and go straight to puppeteer.
+  // If the relay is ever updated to run puppeteer for /prices, re-enable this block.
+  if (false && RELAY_BASE) {
     try {
       const relayUrl = `${RELAY_BASE}/prices`;
-      if (DEBUG) console.log("[predicted] trying relay:", relayUrl);
       const resp = await axios.get(relayUrl, { timeout: 20000 });
-
-      if (DEBUG) console.log("[predicted] relay response ok:", resp.data?.ok, "has html:", !!resp.data?.html, "html length:", resp.data?.html?.length);
-
-      if (resp.data && resp.data.ok && resp.data.html) {
-        const html = resp.data.html;
-        const cards = parseSummaryFromLiveFPL(html);
+      if (resp.data && resp.data.ok && resp.data.html && resp.data.html.length > 10000) {
+        const cards = parseSummaryFromLiveFPL(resp.data.html);
         if (cards.length) return await postProcess(cards);
-        console.log("[predicted] relay returned html but parser found 0 cards — falling back to direct scrape");
-      } else {
-        console.log("[predicted] relay /prices returned not-ok or missing html — falling back to direct scrape");
       }
     } catch (err) {
-      console.log("[predicted] relay /prices failed:", err.message, "— falling back to direct scrape");
+      console.log("[predicted] relay /prices failed:", err.message);
     }
   }
 
-  // --- PUPPETEER FALLBACK (if USE_PUPPETEER=1 is set on the server) ---
+  // --- PUPPETEER (primary path when USE_PUPPETEER=1) ---
   if (puppeteerExtra) {
     try {
       if (DEBUG) console.log("[predicted] trying puppeteer render of livefpl.net/prices");

@@ -2782,148 +2782,84 @@ async function fetchFplTeamMap() {
 }
 
 // Parse livefpl.net/prices rendered HTML → [{name, price, progress}]
-// DOM structure (2026):
-//   section#summary
-//     div.grid.grid-cols-2          ← 2 boxes side by side
-//       div[0]  (rises, bg-emerald header)
-//       div[1]  (falls, bg-red header)
-//   Player row: div.flex.items-center.gap-2.py-2...
-//     img (kit)
-//     span.flex-1.min-w-0.truncate  ← player name
-//     div.shrink-0.flex.gap-0.5     ← price + %
-// Summary tab is the DEFAULT tab so no click needed.
+// Two possible tab states:
+//   Summary tab: section#summary with grid of rises/falls boxes
+//   Table tab:   a table/rows with columns Player | Progress Now | Prediction | Per hr
 function parseSummaryFromLiveFPL(html) {
   const $ = cheerio.load(html);
   const DEBUG = process.env.LIVEFPL_DEBUG;
 
   if (DEBUG) {
     console.log("[predicted] html length:", html.length);
-
-    // Dump ALL section and div ids so we can see what actually rendered
-    const allIds = $("[id]").toArray().map(el => `${el.tagName}#${$(el).attr("id")}`);
-    console.log("[predicted] all IDs in page:", allIds);
-
-    // Find any element containing "Predicted rises" or "Predicted falls"
-    $("*").each((_, el) => {
-      const t = $(el).clone().children().remove().end().text().trim();
-      if (/predicted (rises|falls)/i.test(t)) {
-        console.log("[predicted] found rise/fall text in:", el.tagName, $(el).attr("class")?.slice(0, 80), "| text:", t.slice(0, 60));
-      }
-    });
-
-    // Dump first 2000 chars of body text to see what's actually rendered
-    const bodyText = $("body").text().replace(/\s+/g, " ").trim();
-    console.log("[predicted] body text (first 2000):", bodyText.slice(0, 2000));
+    const bodySnip = $("body").text().replace(/\s+/g, " ").trim().slice(0, 300);
+    console.log("[predicted] body text (first 300):", bodySnip);
   }
 
   const out = [];
 
-  // ── Primary: section#summary → .grid → child[0]=rises, child[1]=falls ──
-  const $grid = $("#summary .grid").first();
-
+  // ── Strategy 1: Summary tab — section#summary grid ──
+  // Two-column grid: child[0]=rises (bg-emerald), child[1]=falls (bg-red)
+  const $grid = $("#summary .grid, section#summary .grid").first();
   if ($grid.length) {
-    const boxes = $grid.children().toArray();
-    if (DEBUG) console.log("[predicted] grid boxes:", boxes.length);
-
-    boxes.forEach((box, boxIdx) => {
+    $grid.children().toArray().forEach((box, boxIdx) => {
       const isRise = boxIdx === 0;
-      // Player rows: div.flex.items-center with gap-2 and py-2
-      // The name is in a span with class "truncate" and "font-medium"
       $(box).find("div.flex.items-center").each((_, row) => {
         const $row = $(row);
-
-        // Name: span with truncate class
         const name = $row.find("span.truncate").first().text().trim();
         if (!name || name.length < 2 || name.length > 40) return;
-
-        // Price + % are in the sibling div with items-end
         const $right = $row.find("div.items-end").first();
         const rightText = $right.text().replace(/\s+/g, " ").trim();
-
         const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
         const mPct   = rightText.match(/([+-]?[0-9]+\.?[0-9]*)\s*%/);
         if (!mPrice || !mPct) return;
-
         const price    = parseFloat(mPrice[1]);
         const rawPct   = parseFloat(mPct[1]);
         if (!isFinite(price) || !isFinite(rawPct)) return;
-
         const progress = isRise ? Math.abs(rawPct) : -Math.abs(rawPct);
-        if (out.find(p => p.name === name)) return;
-        out.push({ name, price, progress });
+        if (!out.find(p => p.name === name)) out.push({ name, price, progress });
       });
     });
-
-    if (DEBUG) console.log("[predicted] primary parse (span.truncate):", out.length);
+    if (DEBUG) console.log("[predicted] strategy 1 (summary grid):", out.length);
     if (out.length) return out;
-  } else {
-    if (DEBUG) console.log("[predicted] #summary .grid not found — page may not be fully rendered");
   }
 
-  // ── Fallback: scan whole page for player rows matching the known classes ──
-  // In case section#summary isn't present but the content is rendered elsewhere.
-  if (DEBUG) console.log("[predicted] fallback: scanning all div.flex.items-center rows");
-  let isRise = true;
-  $("div.flex.items-center").each((_, row) => {
+  // ── Strategy 2: Table tab — parse player rows directly ──
+  // Each row has a span.truncate for name, and cells for price, progress, prediction timing
+  // We include players where Prediction% >= 95 (near-certain)
+  if (DEBUG) console.log("[predicted] strategy 2: parsing table rows");
+
+  $("tr, div.flex.items-center").each((_, row) => {
     const $row = $(row);
     const name = $row.find("span.truncate").first().text().trim();
-    if (!name || name.length < 2 || name.length > 40) return;
+    if (!name || name.length < 2 || name.length > 35) return;
 
-    const $right = $row.find("div.items-end").first();
-    const rightText = $right.text().replace(/\s+/g, " ").trim();
+    const rowText = $row.text().replace(/\s+/g, " ").trim();
 
-    // Detect which box we're in by looking for emerald (rises) or red (falls) ancestor
-    const ancestor = $row.closest("div").parent();
-    if (ancestor.find(".bg-emerald-500\/10, .bg-emerald-500").length) isRise = true;
-    if (ancestor.find(".bg-red-500\/10, .bg-red-500").length) isRise = false;
+    // Extract all percentages from the row — we want the "Prediction" column %
+    // Row format: "Name POS £price Team  OwnershipNow%  Prediction%  Timing  PerHr%"
+    const pcts = [...rowText.matchAll(/([+-]?[0-9]+\.?[0-9]*)\s*%/g)].map(m => parseFloat(m[1]));
+    if (!pcts.length) return;
 
-    const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
-    const mPct   = rightText.match(/([+-]?[0-9]+\.?[0-9]*)\s*%/);
-    if (!mPrice || !mPct) return;
+    // The prediction% is typically the 2nd percentage in the row (after ownership%)
+    const predPct = pcts.length >= 2 ? pcts[1] : pcts[0];
+    if (!isFinite(predPct) || Math.abs(predPct) < 85) return;
 
-    const price    = parseFloat(mPrice[1]);
-    const rawPct   = parseFloat(mPct[1]);
-    if (!isFinite(price) || !isFinite(rawPct)) return;
+    // Price
+    const mPrice = rowText.match(/£\s*([0-9]+\.?[0-9]*)/);
+    const price = mPrice ? parseFloat(mPrice[1]) : 0;
 
-    const progress = isRise ? Math.abs(rawPct) : -Math.abs(rawPct);
-    if (out.find(p => p.name === name)) return;
-    out.push({ name, price, progress });
+    // Direction: check per-hour change to determine rise vs fall
+    // Per hr is the last % in the row — positive = rising, negative = falling
+    const perHr = pcts.length >= 3 ? pcts[pcts.length - 1] : 0;
+    const progress = perHr >= 0 ? Math.abs(predPct) : -Math.abs(predPct);
+
+    if (!out.find(p => p.name === name)) out.push({ name, price, progress });
   });
 
-  if (DEBUG) console.log("[predicted] fallback parse:", out.length);
+  if (DEBUG) console.log("[predicted] strategy 2 (table rows):", out.length);
   return out;
 }
 
-
-// Dedicated puppeteer render for livefpl.net/prices.
-// Waits specifically for the Summary section to render (default tab).
-async function renderLiveFplPrices() {
-  const browser = await puppeteerExtra.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    );
-    await page.setRequestInterception(true);
-    page.on("request", req => {
-      if (["stylesheet", "font", "image", "media"].includes(req.resourceType())) return req.abort();
-      req.continue();
-    });
-    await page.goto("https://www.livefpl.net/prices", { waitUntil: "networkidle0", timeout: 60000 });
-    // Wait until React renders the Summary section with player boxes
-    await page.waitForFunction(() => {
-      const text = document.body?.innerText || "";
-      return text.includes("Predicted rises tonight") || text.includes("Predicted falls tonight");
-    }, { timeout: 30000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 1000));
-    return await page.evaluate(() => document.documentElement.outerHTML);
-  } finally {
-    await browser.close().catch(() => {});
-  }
-}
 
 // ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {

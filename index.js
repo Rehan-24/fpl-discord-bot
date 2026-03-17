@@ -2798,8 +2798,16 @@ function parseSummaryFromLiveFPL(html) {
 
   if (DEBUG) {
     console.log("[predicted] html length:", html.length);
-    const summaryText = $("#summary").text().replace(/\s+/g, " ").trim().slice(0, 300);
+    const summaryText = $("#summary").text().replace(/\s+/g, " ").trim().slice(0, 500);
     console.log("[predicted] #summary text:", summaryText || "(not found)");
+    // Log the raw inner HTML of #summary so we can see what actually rendered
+    const summaryHtml = $("#summary").html();
+    if (summaryHtml) {
+      console.log("[predicted] #summary innerHTML (first 1000):", summaryHtml.slice(0, 1000));
+    }
+    // Also log direct children of #summary to understand structure
+    const children = $("#summary").children().toArray().map(el => `<${el.tagName} class="${$(el).attr("class") || ""}>">`);
+    console.log("[predicted] #summary direct children:", children);
   }
 
   const out = [];

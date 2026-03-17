@@ -2798,28 +2798,52 @@ function parseSummaryFromLiveFPL(html) {
   const out = [];
 
   // ── Strategy 1: Summary tab — section#summary grid ──
-  // Two-column grid: child[0]=rises (bg-emerald), child[1]=falls (bg-red)
+  // Two-column grid: child[0]=rises (bg-emerald header), child[1]=falls (bg-red header)
+  // Within each box there are sub-sections:
+  //   "Projected to reach target" → confirmed (progress >= 100)
+  //   "Maybe (95%+)"              → near-certain (progress 90-99)
+  // The displayed % on the Summary tab is a visual indicator, NOT the raw prediction %.
+  // We use section membership to assign the correct progress bucket instead.
   const $grid = $("#summary .grid, section#summary .grid").first();
   if ($grid.length) {
     $grid.children().toArray().forEach((box, boxIdx) => {
       const isRise = boxIdx === 0;
-      $(box).find("div.flex.items-center").each((_, row) => {
-        const $row = $(row);
-        const name = $row.find("span.truncate").first().text().trim();
+      const $box = $(box);
+
+      // Walk the box looking for section labels then player rows beneath them
+      let currentSection = "maybe"; // default — "maybe" unless we see "Projected" label
+      $box.find("*").each((_, el) => {
+        const $el = $(el);
+        const ownText = $el.clone().children().remove().end().text().trim();
+
+        // Detect section headers
+        if (/projected to reach target/i.test(ownText)) { currentSection = "confirmed"; return; }
+        if (/maybe\s*\(95%\+\)/i.test(ownText))         { currentSection = "maybe"; return; }
+        if (/show low owned/i.test(ownText))              { currentSection = "low"; return; }
+
+        // Skip non-player rows
+        if (currentSection === "low") return;
+
+        // Player rows: must have a span.truncate for the name
+        const name = $el.find("span.truncate").first().text().trim();
         if (!name || name.length < 2 || name.length > 40) return;
-        const $right = $row.find("div.items-end").first();
+
+        // Price from the right-side div
+        const $right = $el.find("div.items-end").first();
         const rightText = $right.text().replace(/\s+/g, " ").trim();
         const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
-        const mPct   = rightText.match(/([+-]?[0-9]+\.?[0-9]*)\s*%/);
-        if (!mPrice || !mPct) return;
-        const price    = parseFloat(mPrice[1]);
-        const rawPct   = parseFloat(mPct[1]);
-        if (!isFinite(price) || !isFinite(rawPct)) return;
-        const progress = isRise ? Math.abs(rawPct) : -Math.abs(rawPct);
+        const price = mPrice ? parseFloat(mPrice[1]) : 0;
+
+        // Assign progress based on section:
+        // confirmed = 105 (clearly above 100 threshold)
+        // maybe = 95 (clearly above 90 threshold but below 100)
+        const rawProgress = currentSection === "confirmed" ? 105 : 95;
+        const progress = isRise ? rawProgress : -rawProgress;
+
         if (!out.find(p => p.name === name)) out.push({ name, price, progress });
       });
     });
-    if (DEBUG) console.log("[predicted] strategy 1 (summary grid):", out.length);
+    if (DEBUG) console.log("[predicted] strategy 1 (summary grid):", out.length, out.map(c => `${c.name}:${c.progress}`));
     if (out.length) return out;
   }
 
@@ -2908,22 +2932,30 @@ async function fetchPredictedFromLiveFPL() {
   const DEBUG = process.env.LIVEFPL_DEBUG;
 
   // helper to normalize parsed cards → { risers, fallers }
+  // Threshold: >=95% = likely change tonight, include as predicted
+  // The Summary tab shows "Predicted" (>=100%) and "Maybe 95%+" buckets —
+  // we include both since even 95%+ players are worth flagging.
+  const PRED_THRESHOLD = Number(process.env.PRICE_PRED_THRESHOLD || 90);
+
   async function postProcess(cards) {
     if (!Array.isArray(cards) || cards.length === 0) {
       return { risers: [], fallers: [] };
     }
 
-    const risersRaw  = cards.filter(c => c.progress >= 100);
-    const fallersRaw = cards.filter(c => c.progress <= -100);
+    if (DEBUG) console.log("[predicted] card progress values:", cards.map(c => `${c.name}:${c.progress}`));
 
-    if (DEBUG) console.log(`[predicted] postProcess: ${risersRaw.length} risers, ${fallersRaw.length} fallers from ${cards.length} cards`);
+    const risersRaw  = cards.filter(c => c.progress >= PRED_THRESHOLD);
+    const fallersRaw = cards.filter(c => c.progress <= -PRED_THRESHOLD);
+
+    if (DEBUG) console.log(`[predicted] postProcess: ${risersRaw.length} risers, ${fallersRaw.length} fallers from ${cards.length} cards (threshold: ${PRED_THRESHOLD}%)`);
 
     const teamMap = await fetchFplTeamMap();
     const attachTeam = (arr) =>
       arr.map(p => ({
         name: p.name,
         team: teamMap[normalizePlayerKey(p.name)] || "",
-        price: p.price
+        price: p.price,
+        progress: p.progress,
       }))
       .slice(0, 25);
 
@@ -3010,35 +3042,42 @@ function buildPredictedMessage(pred) {
   const risers  = Array.isArray(pred?.risers)  ? pred.risers  : [];
   const fallers = Array.isArray(pred?.fallers) ? pred.fallers : [];
 
+  // Split confirmed (>=100%) from maybe (90-99%)
+  const confirmedRisers  = risers.filter(p => (p.progress || 0) >= 100);
+  const maybeRisers      = risers.filter(p => (p.progress || 0) < 100);
+  const confirmedFallers = fallers.filter(p => Math.abs(p.progress || 0) >= 100);
+  const maybeFallers     = fallers.filter(p => Math.abs(p.progress || 0) < 100);
+
+  const fmtPlayer = (p, delta) => {
+    const cur  = fmtPrice(p.price);
+    const next = fmtPrice(addDelta(p.price, delta));
+    const pct  = p.progress != null ? ` _(${Math.abs(Math.round(p.progress))}%)_` : "";
+    return `${cur} ${delta > 0 ? UP : DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}${pct}`;
+  };
+
   const lines = [];
-  lines.push("**POTENTIAL PRICE CHANGES:**");
-  lines.push("");
+  lines.push("**POTENTIAL PRICE CHANGES:**", "");
 
   lines.push("**Predicted Risers:**");
-  if (risers.length) {
-    risers.forEach(p => {
-      const cur = fmtPrice(p.price);
-      const next = fmtPrice(addDelta(p.price, +0.1));
-      lines.push(
-        `${cur} ${UP} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`
-      );
-    });
+  if (confirmedRisers.length) {
+    confirmedRisers.forEach(p => lines.push(fmtPlayer(p, +0.1)));
   } else {
-    lines.push("_None currently_");
+    lines.push("_None confirmed tonight_");
+  }
+  if (maybeRisers.length) {
+    lines.push("_Maybe (95%+):_");
+    maybeRisers.forEach(p => lines.push(fmtPlayer(p, +0.1)));
   }
 
-  lines.push("");
-  lines.push("**Predicted Fallers:**");
-  if (fallers.length) {
-    fallers.forEach(p => {
-      const cur = fmtPrice(p.price);
-      const next = fmtPrice(addDelta(p.price, -0.1));
-      lines.push(
-        `${cur} ${DOWN} ${next} - **${p.name}** ${p.team ? `(${p.team})` : ""}`
-      );
-    });
+  lines.push("", "**Predicted Fallers:**");
+  if (confirmedFallers.length) {
+    confirmedFallers.forEach(p => lines.push(fmtPlayer(p, -0.1)));
   } else {
-    lines.push("_None currently_");
+    lines.push("_None confirmed tonight_");
+  }
+  if (maybeFallers.length) {
+    lines.push("_Maybe (95%+):_");
+    maybeFallers.forEach(p => lines.push(fmtPlayer(p, -0.1)));
   }
 
   return lines.join("\n");

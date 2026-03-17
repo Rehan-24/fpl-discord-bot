@@ -2781,152 +2781,105 @@ async function fetchFplTeamMap() {
   return byName;
 }
 
-// Extract the "Summary of Predictions" section and read player cards
+// Parse livefpl.net/prices rendered HTML → [{name, price, progress}]
+// DOM structure (2026):
+//   section#summary
+//     div.grid.grid-cols-2          ← 2 boxes side by side
+//       div[0]  (rises, bg-emerald header)
+//       div[1]  (falls, bg-red header)
+//   Player row: div.flex.items-center.gap-2.py-2...
+//     img (kit)
+//     span.flex-1.min-w-0.truncate  ← player name
+//     div.shrink-0.flex.gap-0.5     ← price + %
+// Summary tab is the DEFAULT tab so no click needed.
 function parseSummaryFromLiveFPL(html) {
   const $ = cheerio.load(html);
   const DEBUG = process.env.LIVEFPL_DEBUG;
 
   if (DEBUG) {
     console.log("[predicted] html length:", html.length);
-    // Log all headings found so we can see what's actually on the page
-    const headings = $("h1,h2,h3,h4,h5,h6").map((_, el) => `<${el.tagName}> ${$(el).text().trim().slice(0, 60)}`).toArray();
-    console.log("[predicted] headings found:", headings.length, headings.slice(0, 10));
+    const summaryText = $("#summary").text().replace(/\s+/g, " ").trim().slice(0, 300);
+    console.log("[predicted] #summary text:", summaryText || "(not found)");
   }
-
-  // Find "Summary of Predictions" heading — try progressively looser matches
-  let hdr = $("h1,h2,h3,h4").filter((_, el) =>
-    /summary of predictions/i.test($(el).text())
-  ).first();
-
-  // Fallback: some page versions use "Predicted" as the section title
-  if (!hdr.length) {
-    hdr = $("h1,h2,h3,h4").filter((_, el) =>
-      /^predicted$/i.test($(el).text().trim())
-    ).first();
-  }
-
-  if (!hdr.length) {
-    if (DEBUG) console.log("[predicted] no 'Summary of Predictions' heading found — page may not be fully rendered");
-    return [];
-  }
-  if (DEBUG) console.log("[predicted] found heading:", hdr.text().trim());
-
-  const blockNodes = [];
-  let n = hdr[0].nextSibling;
-  while (n) {
-    if (n.type === "tag") {
-      const txt = $(n).text().trim();
-      if (/^player\s+progress/i.test(txt) || /^all\s+players/i.test(txt)) break;
-    }
-    blockNodes.push(n);
-    n = n.nextSibling;
-  }
-
-  const section = $(blockNodes);
-  if (DEBUG) console.log("[predicted] section text length:", section.text().length);
 
   const out = [];
 
-  // Try h5/h6 first (original card layout)
-  section.find("h5,h6").each((_, h) => {
-    const name = $(h).text().trim();
-    if (!name) return;
+  // ── Primary: section#summary → .grid → child[0]=rises, child[1]=falls ──
+  const $grid = $("#summary .grid").first();
 
-    const txt = $(h).parent().text().replace(/\s+/g, " ").trim();
-    const mPrice = txt.match(/£\s*([0-9]+(?:\.[0-9])?)/i);
-    const mPct   = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
+  if ($grid.length) {
+    const boxes = $grid.children().toArray();
+    if (DEBUG) console.log("[predicted] grid boxes:", boxes.length);
+
+    boxes.forEach((box, boxIdx) => {
+      const isRise = boxIdx === 0;
+      // Player rows: div.flex.items-center with gap-2 and py-2
+      // The name is in a span with class "truncate" and "font-medium"
+      $(box).find("div.flex.items-center").each((_, row) => {
+        const $row = $(row);
+
+        // Name: span with truncate class
+        const name = $row.find("span.truncate").first().text().trim();
+        if (!name || name.length < 2 || name.length > 40) return;
+
+        // Price + % are in the sibling div with items-end
+        const $right = $row.find("div.items-end").first();
+        const rightText = $right.text().replace(/\s+/g, " ").trim();
+
+        const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
+        const mPct   = rightText.match(/([+-]?[0-9]+\.?[0-9]*)\s*%/);
+        if (!mPrice || !mPct) return;
+
+        const price    = parseFloat(mPrice[1]);
+        const rawPct   = parseFloat(mPct[1]);
+        if (!isFinite(price) || !isFinite(rawPct)) return;
+
+        const progress = isRise ? Math.abs(rawPct) : -Math.abs(rawPct);
+        if (out.find(p => p.name === name)) return;
+        out.push({ name, price, progress });
+      });
+    });
+
+    if (DEBUG) console.log("[predicted] primary parse (span.truncate):", out.length);
+    if (out.length) return out;
+  } else {
+    if (DEBUG) console.log("[predicted] #summary .grid not found — page may not be fully rendered");
+  }
+
+  // ── Fallback: scan whole page for player rows matching the known classes ──
+  // In case section#summary isn't present but the content is rendered elsewhere.
+  if (DEBUG) console.log("[predicted] fallback: scanning all div.flex.items-center rows");
+  let isRise = true;
+  $("div.flex.items-center").each((_, row) => {
+    const $row = $(row);
+    const name = $row.find("span.truncate").first().text().trim();
+    if (!name || name.length < 2 || name.length > 40) return;
+
+    const $right = $row.find("div.items-end").first();
+    const rightText = $right.text().replace(/\s+/g, " ").trim();
+
+    // Detect which box we're in by looking for emerald (rises) or red (falls) ancestor
+    const ancestor = $row.closest("div").parent();
+    if (ancestor.find(".bg-emerald-500\/10, .bg-emerald-500").length) isRise = true;
+    if (ancestor.find(".bg-red-500\/10, .bg-red-500").length) isRise = false;
+
+    const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
+    const mPct   = rightText.match(/([+-]?[0-9]+\.?[0-9]*)\s*%/);
     if (!mPrice || !mPct) return;
 
     const price    = parseFloat(mPrice[1]);
-    const progress = parseFloat(mPct[1]);
-    if (!isFinite(price) || !isFinite(progress)) return;
+    const rawPct   = parseFloat(mPct[1]);
+    if (!isFinite(price) || !isFinite(rawPct)) return;
+
+    const progress = isRise ? Math.abs(rawPct) : -Math.abs(rawPct);
+    if (out.find(p => p.name === name)) return;
     out.push({ name, price, progress });
   });
 
-  if (DEBUG) console.log("[predicted] cards found via h5/h6:", out.length);
-
-  // Fallback: if h5/h6 found nothing, try any element with a £price AND % in it
-  // (handles layout changes where player names are in spans/divs instead)
-  if (!out.length) {
-    if (DEBUG) console.log("[predicted] trying fallback selector (any element with £ and %)");
-    section.find("[class*=card],[class*=player],[class*=item]").each((_, el) => {
-      const txt  = $(el).text().replace(/\s+/g, " ").trim();
-      const mPct = txt.match(/(-?\d+(?:\.\d+)?)\s*%/);
-      if (!mPct) return;
-      const progress = parseFloat(mPct[1]);
-      if (!isFinite(progress) || Math.abs(progress) < 80) return; // only near-certain predictions
-
-      const mPrice = txt.match(/£\s*([0-9]+(?:\.[0-9])?)/i);
-      if (!mPrice) return;
-      const price = parseFloat(mPrice[1]);
-      if (!isFinite(price)) return;
-
-      // name: first chunk of text before position/price info
-      const name = txt.split(/\s*(?:£|[A-Z]{3}|GK|DEF|MID|FWD)/)[0].trim();
-      if (!name || name.length > 40) return;
-      out.push({ name, price, progress });
-    });
-    if (DEBUG) console.log("[predicted] cards found via fallback:", out.length);
-  }
-
+  if (DEBUG) console.log("[predicted] fallback parse:", out.length);
   return out;
 }
 
-
-// Dedicated puppeteer render for livefpl.net/prices — waits for the React app
-// to finish rendering the "Summary of Predictions" section specifically.
-async function renderLiveFplPrices() {
-  const browser = await puppeteerExtra.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--disable-features=site-per-process",
-    ],
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    );
-
-    // Block heavy assets for speed
-    await page.setRequestInterception(true);
-    page.on("request", (req) => {
-      const t = req.resourceType();
-      if (["stylesheet", "font", "image", "media"].includes(t)) return req.abort();
-      req.continue();
-    });
-
-    await page.goto("https://www.livefpl.net/prices", {
-      waitUntil: "networkidle0",
-      timeout: 60000,
-    });
-
-    // Wait for livefpl's React app to render the price predictions —
-    // specifically wait until we can see text containing "Summary of Predictions"
-    // or at least some £-prices and percentages (the actual player cards).
-    await page.waitForFunction(() => {
-      const text = document.body?.innerText || "";
-      return (
-        text.includes("Summary of Predictions") ||
-        // fallback: at least 5 price values rendered (£X.X)
-        (text.match(/£\d+\.\d/g) || []).length >= 5
-      );
-    }, { timeout: 30000 }).catch(() => {
-      // If timeout, we'll still grab whatever rendered — better than nothing
-    });
-
-    // Extra settle for any lazy-loaded components
-    await new Promise(r => setTimeout(r, 1000));
-
-    return await page.evaluate(() => document.documentElement.outerHTML);
-  } finally {
-    await browser.close().catch(() => {});
-  }
-}
 
 // ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {

@@ -23,6 +23,7 @@
     "node-cron": "^4.2.1",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "turndown": "^7.2.1"
+    "turndown": "^7.2.1",
+    "puppeteer": "^22.0.0"
   }
 }

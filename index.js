@@ -2873,6 +2873,61 @@ function parseSummaryFromLiveFPL(html) {
 }
 
 
+// Dedicated puppeteer render for livefpl.net/prices — waits for the React app
+// to finish rendering the "Summary of Predictions" section specifically.
+async function renderLiveFplPrices() {
+  const browser = await puppeteerExtra.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-features=site-per-process",
+    ],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    );
+
+    // Block heavy assets for speed
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const t = req.resourceType();
+      if (["stylesheet", "font", "image", "media"].includes(t)) return req.abort();
+      req.continue();
+    });
+
+    await page.goto("https://www.livefpl.net/prices", {
+      waitUntil: "networkidle0",
+      timeout: 60000,
+    });
+
+    // Wait for livefpl's React app to render the price predictions —
+    // specifically wait until we can see text containing "Summary of Predictions"
+    // or at least some £-prices and percentages (the actual player cards).
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || "";
+      return (
+        text.includes("Summary of Predictions") ||
+        // fallback: at least 5 price values rendered (£X.X)
+        (text.match(/£\d+\.\d/g) || []).length >= 5
+      );
+    }, { timeout: 30000 }).catch(() => {
+      // If timeout, we'll still grab whatever rendered — better than nothing
+    });
+
+    // Extra settle for any lazy-loaded components
+    await new Promise(r => setTimeout(r, 1000));
+
+    return await page.evaluate(() => document.documentElement.outerHTML);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
 // ---------- PREDICTED (robust: relay → direct) ----------
 async function fetchPredictedFromLiveFPL() {
   const DEBUG = process.env.LIVEFPL_DEBUG;
@@ -2925,28 +2980,58 @@ async function fetchPredictedFromLiveFPL() {
     }
   }
 
-  // --- DIRECT FALLBACK -------------------
-  const url = "https://www.livefpl.net/prices";
-  if (DEBUG) console.log("[predicted] fetching direct:", url);
+  // --- PUPPETEER FALLBACK (if USE_PUPPETEER=1 is set on the server) ---
+  if (puppeteerExtra) {
+    try {
+      if (DEBUG) console.log("[predicted] trying puppeteer render of livefpl.net/prices");
+      const html = await renderLiveFplPrices();
+      if (DEBUG) console.log("[predicted] puppeteer html length:", html?.length);
+      if (html && html.length > 5000) {
+        const cards = parseSummaryFromLiveFPL(html);
+        if (cards.length) return await postProcess(cards);
+        console.log("[predicted] puppeteer rendered but parser found 0 cards — page structure may have changed");
+      }
+    } catch (e) {
+      console.log("[predicted] puppeteer render failed:", e?.message || e);
+    }
+  }
 
-  const { data: html } = await getWithRetries(url, {
-    timeout: 20000,
-    headers: {
-      "User-Agent": "tfpl-bot/1.0 (+https://tfpl.vercel.app)",
-      "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-    },
-    useFplWarmup: false,
-    referer: "https://www.livefpl.net/prices",
-    origin:  "https://www.livefpl.net",
-  });
+  // --- LAST RESORT: compute from FPL bootstrap directly ---
+  // livefpl.net uses transfers_in/out_event to calculate the "progress %" shown on their page.
+  // We replicate that here: progress = (net_transfers / threshold) * 100
+  // threshold ~300k is the empirically observed level at which FPL changes a price.
+  console.log("[predicted] falling back to FPL bootstrap calculation (relay/puppeteer unavailable or returned empty page)");
+  try {
+    const THRESHOLD = Number(process.env.PRICE_CHANGE_THRESHOLD || 300000);
+    const data = await getBootstrapData();
+    const teams = {};
+    for (const t of data?.teams ?? []) teams[t.id] = t.short_name || t.name || "";
 
-  if (DEBUG) console.log("[predicted] direct html length:", String(html).length, "is CSR shell:", String(html).length < 5000);
+    const cards = [];
+    for (const el of data?.elements ?? []) {
+      if (el.cost_change_event !== 0) continue; // already confirmed, skip
+      const net = (el.transfers_in_event ?? 0) - (el.transfers_out_event ?? 0);
+      if (net === 0) continue;
+      const progress = (net / THRESHOLD) * 100;
+      if (Math.abs(progress) < 100) continue;
+      cards.push({
+        name:     el.web_name || "",
+        price:    (el.now_cost ?? 0) / 10,
+        progress: Math.round(progress),
+        team:     teams[el.team] || "",
+      });
+    }
+    cards.sort((a, b) => Math.abs(b.progress) - Math.abs(a.progress));
+    if (DEBUG) console.log(`[predicted] FPL bootstrap fallback: ${cards.filter(c=>c.progress>=100).length} risers, ${cards.filter(c=>c.progress<=-100).length} fallers`);
 
-  const cards = parseSummaryFromLiveFPL(html);
-  return await postProcess(cards);
+    // postProcess expects {name,price,progress} — team already attached so skip teamMap lookup
+    const risers  = cards.filter(c => c.progress >= 100).slice(0, 25);
+    const fallers = cards.filter(c => c.progress <= -100).slice(0, 25);
+    return { risers, fallers };
+  } catch (e) {
+    console.log("[predicted] FPL bootstrap fallback failed:", e?.message || e);
+    return { risers: [], fallers: [] };
+  }
 }
 
 

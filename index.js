@@ -2876,21 +2876,27 @@ async function renderLiveFplPrices() {
       if (["stylesheet", "font", "image", "media"].includes(req.resourceType())) return req.abort();
       req.continue();
     });
-    await page.goto("https://www.livefpl.net/prices", { waitUntil: "networkidle0", timeout: 60000 });
+    await page.goto("https://www.livefpl.net/prices", { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    // Page lands on Table tab — click Summary tab to get rise/fall boxes
+    // Wait for React to render the table data (confirms JS has executed)
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || "";
+      return text.includes("Progress") || text.includes("Prediction") || text.includes("£");
+    }, { timeout: 20000 }).catch(() => {});
+
+    // Click the Summary tab
     await page.evaluate(() => {
       const btn = Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === "Summary");
       if (btn) btn.click();
     });
 
-    // Wait for Summary content to render
+    // Wait for Summary content
     await page.waitForFunction(() => {
       const text = document.body?.innerText || "";
       return text.includes("Predicted rises tonight") || text.includes("Predicted falls tonight");
-    }, { timeout: 15000 }).catch(() => {});
+    }, { timeout: 10000 }).catch(() => {});
 
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 500));
     return await page.evaluate(() => document.documentElement.outerHTML);
   } finally {
     await browser.close().catch(() => {});

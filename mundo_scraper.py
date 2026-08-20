@@ -27,7 +27,7 @@ def _gw(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 def _league_tag(url: str) -> str:
-    return "Premier" if "723566" in url else "Championship"
+    return "Premier" if "907148" in url else "Championship"
 
 def _league_code(url: str) -> Optional[str]:
     m = re.search(r"/(\d{5,9})(?:/|$)", urlparse(url).path)
@@ -153,7 +153,7 @@ def _mine_json(obj: Any) -> List[Tuple[str,str,Optional[str]]]:
 def seed_cookies(url: str):
     """Open headed browser, let user click 'I AGREE', then save storage state."""
     from playwright.sync_api import sync_playwright
-    league = _league_code(url) or "723566"
+    league = _league_code(url) or "907148"
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=200)
         context = browser.new_context()  # fresh
@@ -171,7 +171,7 @@ def seed_cookies(url: str):
 
 def scrape(url: str, dump: bool=False, headed: bool=False) -> List[str]:
     from playwright.sync_api import sync_playwright
-    code = _league_code(url) or "723566"
+    code = _league_code(url) or "907148"
     tag  = _league_tag(url)
 
     with sync_playwright() as p:
@@ -238,7 +238,7 @@ def scrape(url: str, dump: bool=False, headed: bool=False) -> List[str]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", nargs="?", default="https://www.fplmundo.com/723566")
+    ap.add_argument("url", nargs="?", default="https://www.fplmundo.com/907148")
     ap.add_argument("--dump", action="store_true", help="Dump DOM and captured JSON")
     ap.add_argument("--headed", action="store_true", help="Run with a visible browser")
     ap.add_argument("--seed", action="store_true", help="Open headed browser to click consent and save state, then exit")

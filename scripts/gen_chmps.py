@@ -1,6 +1,6 @@
 import subprocess, shlex, json, sys, os, shutil, glob, time
 
-CMD   = "python mundo_scraper.py https://www.fplmundo.com/850022"
+CMD   = "python mundo_scraper.py https://www.fplmundo.com/907452"
 LABEL = "chmps"
 
 PLACEHOLDER_PATTERNS = [

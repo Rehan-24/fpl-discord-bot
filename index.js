@@ -188,9 +188,9 @@ function debugLog(...args) {
 }
 
 const FPL_MUNDO_PREMIER_URL =
-  process.env.FPL_MUNDO_PREMIER_URL || "https://www.fplmundo.com/723566";
+  process.env.FPL_MUNDO_PREMIER_URL || "https://www.fplmundo.com/907148";
 const FPL_MUNDO_CHAMP_URL =
-  process.env.FPL_MUNDO_CHAMP_URL || "https://www.fplmundo.com/850022";
+  process.env.FPL_MUNDO_CHAMP_URL || "https://www.fplmundo.com/907452";
 const FPL_MUNDO_PLACEHOLDER_IMAGE =
   process.env.FPL_MUNDO_PLACEHOLDER_IMAGE ||
   "https://fplvideotemplates.com/shop-all/templates/images/Gameweek-Review-Analysis-PPT-230802-1360x765-02.jpg";
@@ -1381,13 +1381,13 @@ function extractPostLinksFromLeaguePage(html, baseUrl) {
 
   const out1 = new Set();
 
-  // Absolute like https://www.fplmundo.com/723566
+  // Absolute like https://www.fplmundo.com/907148
   for (const m of htmlStr.matchAll(/https?:\/\/(?:www\.)?fplmundo\.com\/(\d{5,9})(?!\d)/gi)) {
     out1.add(`${base.origin}/${m[1]}`);
     if (out1.size >= MUNDO_MAX_LINKS) break;
   }
 
-  // Relative like /723566
+  // Relative like /907148
   if (out1.size < MUNDO_MAX_LINKS) {
     for (const m of htmlStr.matchAll(/(^|[^a-z0-9/_-])\/(\d{5,9})(?!\d)/gi)) {
       out1.add(`${base.origin}/${m[2]}`);
@@ -1583,8 +1583,8 @@ async function fetchLeagueTable(league) {
 
   // 2. Relay first (stable IP, caching, polite backoff)
   const FPL_IDS = {
-    premier: "723566",
-    championship: "850022",
+    premier: "907148",
+    championship: "907452",
   };
   if (RELAY_BASE) {
     const leagueId = FPL_IDS[league] || league;
@@ -1840,7 +1840,7 @@ function clearReminders() {
 // Provide env LEAGUE_FIXTURES_ENDPOINT_<LEAGUE> or LEAGUE_FIXTURES_ENDPOINT (global)
 // Endpoint should return an array of fixtures like:
 // [{home_owner, away_owner}] or [{home_team, away_team}] or generic {a_owner,b_owner,a_team,b_team}
-const DEFAULT_FPL_H2H_IDS = { premier: "723566", championship: "850022" };
+const DEFAULT_FPL_H2H_IDS = { premier: "907148", championship: "907452" };
 async function fetchFixtures(league, gw) {
   const https = require("https");
   const http = require("http");
@@ -1848,7 +1848,7 @@ async function fetchFixtures(league, gw) {
   // If RELAY_BASE is set, we just ask the relay for fixtures
   // and adapt the shape to what the rest of the bot expects.
   if (RELAY_BASE) {
-  const FPL_IDS = { premier: "723566", championship: "850022" };
+  const FPL_IDS = { premier: "907148", championship: "907452" };
   const leagueId = FPL_IDS[league] || league;
 
   try {

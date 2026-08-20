@@ -3,7 +3,7 @@ import sys, re, html, json, argparse, time, os
 from typing import List, Tuple, Optional, Any, Dict
 from urllib.parse import urlparse
 
-SEASON_REVIEW_TAG = "GW-Review-2025/26"
+SEASON_REVIEW_TAG = "GW-Review-2026/27"
 STATE_PATH = "mundo_state.json"  # created by --seed
 HOMEPAGE_MARKER = re.compile(r"The original FPL mini-league newspaper", re.I)
 BLACKLIST_TITLES = {

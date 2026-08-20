@@ -206,14 +206,14 @@ try {
 } catch (_) { /* puppeteer optional */ }
 
 // Tag for this season’s weekly reviews
-const FPL_MUNDO_TAG = "GW-Review-2025/26";
+const FPL_MUNDO_TAG = "GW-Review-2026/27";
 
 // ===== Weekly Reviews article config =====
 const WEEKLY_REVIEW_IMAGE =
   process.env.WEEKLY_REVIEW_IMAGE ||
   "https://news.bbcimg.co.uk/media/images/53844000/jpg/_53844767_012374172-1.jpg";
 const WEEKLY_REVIEW_TAG =
-  process.env.WEEKLY_REVIEW_TAG || "GW-Review-2025/26";
+  process.env.WEEKLY_REVIEW_TAG || "GW-Review-2026/27";
 
 // Require the GW to be both finished AND data_checked before posting summaries.
 // Set GW_SUMMARY_REQUIRE_FINALIZED=0 to relax to "finished only".

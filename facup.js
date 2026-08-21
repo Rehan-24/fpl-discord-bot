@@ -28,7 +28,7 @@ const SITE_BASE     = (process.env.SITE_BASE || "https://tfpl.vercel.app").repla
 const FACUP_URL     = `${SITE_BASE}/facup`;
 const CHANNEL_ID    = process.env.DEADLINE_CHANNEL_ID;   // reuse same channel as deadline reminders
 const TZ            = process.env.TZ || "America/Los_Angeles";
-const FA_CUP_SEASON = process.env.FA_CUP_SEASON || "2025-26";
+const FA_CUP_SEASON = process.env.FA_CUP_SEASON || "2026-27";
 
 // FA Cup GW schedule — update these if the tournament GWs change
 const FA_CUP_ROUNDS = [

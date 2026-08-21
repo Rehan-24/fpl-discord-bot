@@ -5,6 +5,14 @@ from urllib.parse import urlparse
 
 SEASON_REVIEW_TAG = "GW-Review-2026/27"
 STATE_PATH = "mundo_state.json"  # created by --seed
+
+# Same per-league identity images used site-wide as og:image on the
+# Premier/Championship table pages, season archives, and the FA Cup
+# page -- used here as the default when a scraped article has no image.
+LEAGUE_DEFAULT_IMAGE = {
+    "Premier": "https://gmkoutsi.com/wp-content/uploads/2023/08/fantasy-premier-league.webp",
+    "Championship": "https://4.bp.blogspot.com/-ilHxPtWB8FA/VkS9BiuUpAI/AAAAAAAAxAM/QNQtiFimLyE/s1600/English-Football-League%2B%25281%2529.jpg",
+}
 HOMEPAGE_MARKER = re.compile(r"The original FPL mini-league newspaper", re.I)
 BLACKLIST_TITLES = {
     "MINI LEAGUE NEWS ROUNDUP","PREMATCH EDITION","POSTMATCH EDITION","FANS, KITS AND STADIUMS",
@@ -35,8 +43,9 @@ def _league_code(url: str) -> Optional[str]:
 
 def _cmd(gw: Optional[str], title: str, body: str, tag: str, image: Optional[str]) -> str:
     t = f"GW{gw} Review: {title}".strip() if gw else f"Review: {title}"
+    img = image or LEAGUE_DEFAULT_IMAGE.get(tag, "")
     return (f"/publish_news title: {t} content: { _sanitize(body) } "
-            f"tags: {tag}, {SEASON_REVIEW_TAG} excerpt: { _sanitize(body) } image_url: {image or ''}")
+            f"tags: {tag}, {SEASON_REVIEW_TAG} excerpt: { _sanitize(body) } image_url: {img}")
 
 def _bs4(html_text: str):
     from bs4 import BeautifulSoup

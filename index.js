@@ -2827,14 +2827,20 @@ function parseSummaryFromLiveFPL(html) {
         // Skip non-player rows
         if (currentSection === "low") return;
 
-        // Player rows: must have a span.truncate for the name
-        const name = $el.find("span.truncate").first().text().trim();
+        // Player rows: name lives in a <p class="truncate"> now (was
+        // <span> before a livefpl redesign). The card's own outer
+        // wrapper div is ALSO class="truncate", so match p.truncate
+        // specifically -- a bare ".truncate" would grab that wrapper
+        // first and return the name+price text concatenated together.
+        const name = $el.find("p.truncate").first().text().trim();
         if (!name || name.length < 2 || name.length > 40) return;
 
-        // Price from the right-side div
-        const $right = $el.find("div.items-end").first();
-        const rightText = $right.text().replace(/\s+/g, " ").trim();
-        const mPrice = rightText.match(/£\s*([0-9]+\.?[0-9]*)/);
+        // Price: livefpl no longer wraps it in a "div.items-end" --
+        // pull it from the card's own text instead, same robust regex
+        // Strategy 2 already uses, rather than depending on a specific
+        // wrapper class that can (and did) disappear in a site redesign.
+        const cardText = $el.text().replace(/\s+/g, " ").trim();
+        const mPrice = cardText.match(/£\s*([0-9]+\.?[0-9]*)/);
         const price = mPrice ? parseFloat(mPrice[1]) : 0;
 
         // Assign progress based on section:
@@ -2851,13 +2857,16 @@ function parseSummaryFromLiveFPL(html) {
   }
 
   // ── Strategy 2: Table tab — parse player rows directly ──
-  // Each row has a span.truncate for name, and cells for price, progress, prediction timing
+  // Each row has a p.truncate element for name (was <span>, is now
+  // <p class="truncate"> after a livefpl redesign; a wrapping div also
+  // carries class="truncate", so match p.truncate specifically), and
+  // cells for price, progress, prediction timing.
   // We include players where Prediction% >= 95 (near-certain)
   if (DEBUG) console.log("[predicted] strategy 2: parsing table rows");
 
   $("tr, div.flex.items-center").each((_, row) => {
     const $row = $(row);
-    const name = $row.find("span.truncate").first().text().trim();
+    const name = $row.find("p.truncate").first().text().trim();
     if (!name || name.length < 2 || name.length > 35) return;
 
     const rowText = $row.text().replace(/\s+/g, " ").trim();

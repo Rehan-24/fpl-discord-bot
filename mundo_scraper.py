@@ -13,13 +13,20 @@ LEAGUE_DEFAULT_IMAGE = {
     "Premier": "https://gmkoutsi.com/wp-content/uploads/2023/08/fantasy-premier-league.webp",
     "Championship": "https://4.bp.blogspot.com/-ilHxPtWB8FA/VkS9BiuUpAI/AAAAAAAAxAM/QNQtiFimLyE/s1600/English-Football-League%2B%25281%2529.jpg",
 }
-HOMEPAGE_MARKER = re.compile(r"The original FPL mini-league newspaper", re.I)
+HOMEPAGE_MARKER = re.compile(
+    r"The original FPL mini-league newspaper"
+    r"|Transfer business, captaincy picks, chips used and baseless rumours",
+    re.I,
+)
 BLACKLIST_TITLES = {
     "MINI LEAGUE NEWS ROUNDUP","PREMATCH EDITION","POSTMATCH EDITION","FANS, KITS AND STADIUMS",
     "FOLLOW FOR UPDATES","NOT A REAL NEWSPAPER","FPL MUNDO SUPPORTER LEAGUES",
     "LETTERS FROM READERS","DISCLAIMER","OTHER TERMS AND PRIVACY","PRIVACY POLICY",
     "TERMS","COOKIE POLICY","WELCOME TO FPLMUNDO!",
+    "THE NEWS","THE CHARTS","IN-PLAY POINTS CHART",
 }
+
+EDITION_WAIT_SECONDS = 150  # site generates editions on demand (~30s)
 
 def _clean(s: str) -> str:
     if not s: return ""
@@ -178,6 +185,19 @@ def seed_cookies(url: str):
         context.close()
         browser.close()
 
+def _extract_edition_stories(soup) -> List[Tuple[str,str,Optional[str]]]:
+    """Real edition markup: h1.ed-head (lead) and .story h2.ed-head, each followed by div.ed-body."""
+    img_el = soup.select_one("img[src*='/postmatch/images/']")
+    img = img_el.get("src") if img_el else None
+    out=[]
+    for h in soup.select("h1.ed-head, .story h2.ed-head"):
+        title = _clean(h.get_text(" ", strip=True))
+        body_el = h.find_next_sibling(class_="ed-body")
+        body = _clean(body_el.get_text(" ", strip=True)) if body_el else ""
+        if title and len(body) >= 40:
+            out.append((title, body, img if h.name == "h1" else None))
+    return out
+
 def scrape(url: str, dump: bool=False, headed: bool=False) -> List[str]:
     from playwright.sync_api import sync_playwright
     code = _league_code(url) or "907148"
@@ -204,12 +224,19 @@ def scrape(url: str, dump: bool=False, headed: bool=False) -> List[str]:
                 pass
         page.on("response", on_response)
 
-        # direct to league
+        # direct to league; a not-yet-generated edition shows a "Writing
+        # league ... edition" loader for ~30s, then the page refreshes itself.
         page.goto(f"https://www.fplmundo.com/{code}", wait_until="domcontentloaded", timeout=30000)
-        try: page.wait_for_load_state("networkidle", timeout=12000)
-        except Exception: pass
-        page.wait_for_timeout(1500)
+        deadline = time.time() + EDITION_WAIT_SECONDS
+        while time.time() < deadline:
+            try:
+                if page.query_selector("h1.ed-head, .story h2.ed-head"): break
+            except Exception:
+                pass  # page mid-refresh
+            page.wait_for_timeout(3000)
+        page.wait_for_timeout(1000)
         html_text = page.content()
+        page_title = page.title()
 
         if dump:
             with open("mundo_dump.html","w",encoding="utf-8") as f: f.write(html_text)
@@ -220,28 +247,12 @@ def scrape(url: str, dump: bool=False, headed: bool=False) -> List[str]:
         context.close()
         browser.close()
 
-    # parse DOM -> fallback to JSON
     soup = _bs4(html_text)
-    page_text = _clean(soup.get_text(" ", strip=True))
-    gw = _gw(page_text)
+    gw = _gw(page_title) or _gw(_clean(soup.get_text(" ", strip=True))[:600])
 
-    stories = _extract_cards(soup)
-    if len(stories) < 4:
-        for t,b,i in _extract_headings(soup):
-            if all(t.lower()!=s[0].lower() for s in stories):
-                stories.append((t,b,i))
-            if len(stories) >= 4: break
-
-    if len(stories) < 4 and captured:
-        mined=[]
-        for blob in captured: mined += _mine_json(blob["json"])
-        for t,b,i in mined:
-            if all(t.lower()!=s[0].lower() for s in stories):
-                stories.append((t,b,i))
-            if len(stories) >= 4: break
-
+    stories = _extract_edition_stories(soup)
     if not stories:
-        raise RuntimeError("No stories found (did the consent cookie seed succeed?)")
+        raise RuntimeError("No edition stories found (edition not published yet, or still generating).")
 
     return [_cmd(gw, t, b, tag, i) for (t,b,i) in stories[:4]]
 
